@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Mercado Uíge</string>
+    <string name="title_activity_main">Mercado Uíge</string>
+    <string name="package_name">ao.mercadouige.app</string>
+    <string name="custom_url_scheme">ao.mercadouige.app</string>
+</resources>

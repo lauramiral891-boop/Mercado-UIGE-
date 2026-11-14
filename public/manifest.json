@@ -1,0 +1,20 @@
+{
+  "name": "Mercado Uíge",
+  "short_name": "Mercado Uíge",
+  "description": "O maior mercado digital da província do Uíge, Angola. Comprar, Vender e Conectar.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#07111F",
+  "theme_color": "#246BFD",
+  "lang": "pt-AO",
+  "categories": ["shopping", "business", "lifestyle"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "512x512 192x192 144x144 96x96 48x48",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

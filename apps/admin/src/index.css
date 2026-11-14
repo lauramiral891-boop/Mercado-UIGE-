@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+:root {
+  --primary: #246BFD;
+  --accent: #B7F34A;
+  --background: #07111F;
+  --surface: #172338;
+  --surface-secondary: #111D30;
+  --text-primary: #F8FAFC;
+  --text-secondary: #A6B2C5;
+  --border: #26354B;
+}
+
+body {
+  background-color: #07111F;
+  color: #F8FAFC;
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+@keyframes mu-fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes mu-pop {
+  0% { transform: scale(0.92); opacity: 0; }
+  60% { transform: scale(1.02); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.anim-fadeUp { animation: mu-fadeUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.anim-pop { animation: mu-pop 0.25s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

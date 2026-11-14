@@ -1,0 +1,106 @@
+@import "tailwindcss";
+
+:root {
+  --primary: #246BFD;
+  --primary-hover: #1A56DB;
+  --accent: #B7F34A;
+  --accent-text: #07111F;
+  --background: #07111F;
+  --foreground: #F8FAFC;
+  --header-bg: rgba(7, 17, 31, 0.92);
+  --surface: #172338;
+  --surface-secondary: #111D30;
+  --surface-muted: #1e2c45;
+  --nav-bg: rgba(17, 29, 48, 0.96);
+  --text-primary: #F8FAFC;
+  --text-secondary: #A6B2C5;
+  --text-muted: #64748B;
+  --border: #26354B;
+  --border-focus: #246BFD;
+  --success: #22C55E;
+  --warning: #F59E0B;
+  --danger: #EF4444;
+  --shadow-card: 0 8px 30px rgba(0, 0, 0, 0.45);
+  --shadow-glow: 0 0 25px rgba(36, 107, 253, 0.35);
+  --shadow-accent-glow: 0 0 20px rgba(183, 243, 74, 0.25);
+}
+
+html.light, body.light {
+  --primary: #246BFD;
+  --primary-hover: #1A56DB;
+  --accent: #78A900;
+  --accent-text: #FFFFFF;
+  --background: #F6F8FC;
+  --foreground: #111827;
+  --header-bg: rgba(246, 248, 252, 0.94);
+  --surface: #FFFFFF;
+  --surface-secondary: #F0F4FA;
+  --surface-muted: #E2E8F0;
+  --nav-bg: rgba(255, 255, 255, 0.96);
+  --text-primary: #111827;
+  --text-secondary: #64748B;
+  --text-muted: #94A3B8;
+  --border: #E2E8F0;
+  --border-focus: #246BFD;
+  --success: #16A34A;
+  --warning: #D97706;
+  --danger: #DC2626;
+  --shadow-card: 0 4px 20px rgba(15, 23, 42, 0.08);
+  --shadow-glow: 0 0 20px rgba(36, 107, 253, 0.2);
+  --shadow-accent-glow: 0 0 15px rgba(120, 169, 0, 0.15);
+}
+
+html {
+  scroll-behavior: smooth;
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--text-primary);
+  min-height: 100vh;
+  transition: background-color 0.25s ease, color 0.25s ease, border-color 0.25s ease;
+  overflow-x: hidden;
+}
+
+@keyframes mu-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+@keyframes mu-fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes mu-pop {
+  0% { transform: scale(0.92); opacity: 0; }
+  60% { transform: scale(1.02); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes mu-spin {
+  to { transform: rotate(360deg); }
+}
+
+.anim-fadeUp { animation: mu-fadeUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.anim-pop { animation: mu-pop 0.25s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.anim-float { animation: mu-float 3.5s ease-in-out infinite; }
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 16px);
+}
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

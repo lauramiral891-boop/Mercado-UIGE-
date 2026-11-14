@@ -1,0 +1,17 @@
+{
+  "name": "@mercado-uige/shared",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.119.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/app": "^7.0.0",
+    "@capacitor/network": "^7.0.0",
+    "@capacitor/status-bar": "^7.0.0",
+    "@capacitor/share": "^7.0.0",
+    "@capacitor/haptics": "^7.0.0"
+  }
+}

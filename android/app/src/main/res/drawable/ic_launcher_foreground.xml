@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Fundo azul eléctrico central -->
+    <path
+        android:fillColor="#246BFD"
+        android:pathData="M34,26 L74,26 A8,8 0 0,1 82,34 L82,74 A8,8 0 0,1 74,82 L34,82 A8,8 0 0,1 26,74 L26,34 A8,8 0 0,1 34,26 Z" />
+    <!-- Carrinho de compras tecnológico em verde #B7F34A -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#B7F34A"
+        android:strokeWidth="4.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M35,40 L41,40 L45,62 L69,62 L73,46 L43,46" />
+    <path
+        android:fillColor="#B7F34A"
+        android:pathData="M48,70 m-3.2,0 a3.2,3.2 0 1,0 6.4,0 a3.2,3.2 0 1,0 -6.4,0" />
+    <path
+        android:fillColor="#B7F34A"
+        android:pathData="M66,70 m-3.2,0 a3.2,3.2 0 1,0 6.4,0 a3.2,3.2 0 1,0 -6.4,0" />
+</vector>

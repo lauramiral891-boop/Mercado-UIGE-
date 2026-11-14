@@ -1,0 +1,6 @@
+{
+  "name": "Mercado Uíge",
+  "description": "O maior mercado digital da província do Uíge, Angola. Comprar, Vender e Conectar com tecnologia e comércio local.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

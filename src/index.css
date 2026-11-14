@@ -1,0 +1,141 @@
+@import "tailwindcss";
+
+:root {
+  /* Default Dark Mode (Mercado Uíge Signature Theme) */
+  --background: #07111F;
+  --foreground: #F8FAFC;
+  --surface: #172338;
+  --surface-secondary: #111D30;
+  --surface-muted: #1e2c45;
+  --text-primary: #F8FAFC;
+  --text-secondary: #A6B2C5;
+  --text-muted: #64748B;
+  --border: #26354B;
+  --border-focus: #246BFD;
+  --primary: #246BFD;
+  --primary-hover: #1b57d6;
+  --accent: #B7F34A;
+  --accent-text: #07111F;
+  --success: #22C55E;
+  --warning: #F59E0B;
+  --danger: #EF4444;
+  --header-bg: rgba(7, 17, 31, 0.88);
+  --nav-bg: rgba(17, 29, 48, 0.94);
+  --shadow-card: 0 8px 30px rgba(0, 0, 0, 0.45);
+  --shadow-glow: 0 0 25px rgba(36, 107, 253, 0.35);
+  --shadow-accent-glow: 0 0 20px rgba(183, 243, 74, 0.25);
+}
+
+html.light, body.light {
+  /* Light Mode */
+  --background: #F6F8FC;
+  --foreground: #111827;
+  --surface: #FFFFFF;
+  --surface-secondary: #F0F4FA;
+  --surface-muted: #E2E8F0;
+  --text-primary: #111827;
+  --text-secondary: #64748B;
+  --text-muted: #94A3B8;
+  --border: #E2E8F0;
+  --border-focus: #246BFD;
+  --primary: #246BFD;
+  --primary-hover: #1b57d6;
+  --accent: #78A900;
+  --accent-text: #FFFFFF;
+  --success: #16A34A;
+  --warning: #D97706;
+  --danger: #DC2626;
+  --header-bg: rgba(246, 248, 252, 0.92);
+  --nav-bg: rgba(255, 255, 255, 0.96);
+  --shadow-card: 0 4px 20px rgba(15, 23, 42, 0.08);
+  --shadow-glow: 0 0 20px rgba(36, 107, 253, 0.2);
+  --shadow-accent-glow: 0 0 15px rgba(120, 169, 0, 0.15);
+}
+
+html {
+  scroll-behavior: smooth;
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--text-primary);
+  min-height: 100vh;
+  transition: background-color 0.25s ease, color 0.25s ease, border-color 0.25s ease;
+  overflow-x: hidden;
+}
+
+/* Animations */
+@keyframes mu-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+@keyframes mu-glow {
+  0%, 100% { box-shadow: 0 0 24px rgba(36, 107, 253, 0.45); }
+  50% { box-shadow: 0 0 42px rgba(183, 243, 74, 0.4); }
+}
+
+@keyframes mu-pulse-dot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.3); opacity: 0.6; }
+}
+
+@keyframes mu-fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes mu-pop {
+  0% { transform: scale(0.92); opacity: 0; }
+  60% { transform: scale(1.02); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes mu-shimmer {
+  0% { background-position: -600px 0; }
+  100% { background-position: 600px 0; }
+}
+
+@keyframes mu-spin {
+  to { transform: rotate(360deg); }
+}
+
+.anim-fadeUp { animation: mu-fadeUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.anim-pop { animation: mu-pop 0.25s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.anim-float { animation: mu-float 3.5s ease-in-out infinite; }
+.anim-glow { animation: mu-glow 2.8s ease-in-out infinite; }
+.anim-pulse { animation: mu-pulse-dot 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+
+/* Skeleton Loader */
+.skeleton {
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.04) 25%, rgba(255, 255, 255, 0.12) 50%, rgba(255, 255, 255, 0.04) 75%);
+  background-size: 800px 100%;
+  animation: mu-shimmer 1.5s infinite linear;
+}
+
+html.light .skeleton, body.light .skeleton {
+  background: linear-gradient(90deg, rgba(15, 23, 42, 0.05) 25%, rgba(15, 23, 42, 0.11) 50%, rgba(15, 23, 42, 0.05) 75%);
+  background-size: 800px 100%;
+  animation: mu-shimmer 1.5s infinite linear;
+}
+
+/* Scrollbar styling */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Android Safe Area support */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 16px);
+}
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
