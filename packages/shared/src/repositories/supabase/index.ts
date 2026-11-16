@@ -25,6 +25,13 @@ import {
   SystemConfig,
   PlanType,
   AdPosition,
+  ApprovalStatus,
+  UserRole,
+  SystemEvent,
+  SystemEventSeverity,
+  AppErrorRecord,
+  SystemHealthMetrics,
+  NocServiceCheck,
 } from "../../types";
 import {
   IProductRepo,
@@ -40,6 +47,9 @@ import {
   IDeliveryRepo,
   ISystemConfigRepo,
   IAuditRepo,
+  ISystemEventRepo,
+  IAppErrorRepo,
+  ISystemHealthRepo,
   ProductFilters,
 } from "../types";
 import {
@@ -56,9 +66,13 @@ import {
   OfflineDeliveryRepo,
   OfflineSystemConfigRepo,
   OfflineAuditRepo,
+  OfflineSystemEventRepo,
+  OfflineAppErrorRepo,
+  OfflineSystemHealthRepo,
   RemoteSyncHandlers,
   syncQueue,
 } from "../offline";
+import { allowTelemetryWrite, sanitizeTelemetryText } from "../../lib/observability";
 
 const fallbackProductRepo = new OfflineProductRepo();
 const fallbackOrderRepo = new OfflineOrderRepo();
@@ -73,6 +87,9 @@ const fallbackPaymentRepo = new OfflinePaymentRepo();
 const fallbackDeliveryRepo = new OfflineDeliveryRepo();
 const fallbackSystemConfigRepo = new OfflineSystemConfigRepo();
 const fallbackAuditRepo = new OfflineAuditRepo();
+const fallbackSystemEventRepo = new OfflineSystemEventRepo();
+const fallbackAppErrorRepo = new OfflineAppErrorRepo();
+const fallbackSystemHealthRepo = new OfflineSystemHealthRepo();
 
 function mapProductRow(row: any): Product {
   return {
@@ -501,6 +518,9 @@ export class SupabaseUserRepo implements IUserRepo {
       biPhotoUrl: u.bi_foto_url,
       residesInUigeConfirmed: u.reside_uige_confirmado ?? true,
       isApproved: u.aprovado ?? true,
+      approvalStatus: u.estado_aprovacao || (u.aprovado === false ? "pendente" : "aprovado"),
+      rejectionReason: u.motivo_rejeicao || null,
+      correctionNote: u.nota_correcao || null,
       walletBalance: 0,
       isSuspended: u.suspenso,
       isVerified: verified,
@@ -558,49 +578,73 @@ export class SupabaseUserRepo implements IUserRepo {
 
   async updateProfile(id: string, updates: Partial<User>): Promise<User> {
     if (isSupabaseConfigured && Object.keys(updates).length > 0) {
-      try {
-        await supabase
-          .from("perfis")
-          .update({
-            nome: updates.name,
-            telefone: updates.phone,
-            municipio: updates.municipality,
-            bairro: updates.bairro,
-            bi_numero: updates.biNumber,
-            bi_foto_url: updates.biPhotoUrl,
-          })
-          .eq("id", id);
-      } catch {}
+      const { error } = await supabase
+        .from("perfis")
+        .update({
+          nome: updates.name,
+          telefone: updates.phone,
+          municipio: updates.municipality,
+          bairro: updates.bairro,
+          bi_numero: updates.biNumber,
+          bi_foto_url: updates.biPhotoUrl,
+        })
+        .eq("id", id);
+      if (error) throw error;
     }
     return fallbackUserRepo.updateProfile(id, updates);
   }
 
   async approveUser(id: string, isApproved: boolean): Promise<void> {
-    await fallbackUserRepo.approveUser(id, isApproved);
-    if (!isSupabaseConfigured) return;
-    try {
-      await supabase.from("perfis").update({ aprovado: isApproved }).eq("id", id);
-    } catch {}
+    await this.updateApproval(id, isApproved ? "aprovado" : "pendente");
+  }
+
+  async updateApproval(id: string, status: ApprovalStatus, note?: string): Promise<void> {
+    const isApproved = status === "aprovado";
+    if (isSupabaseConfigured) {
+      const payload: Record<string, any> = {
+        aprovado: isApproved,
+        estado_aprovacao: status,
+      };
+      if (status === "rejeitado") {
+        payload.motivo_rejeicao = note?.trim() || "Documentação rejeitada pela moderação.";
+      } else if (status === "correcao") {
+        payload.nota_correcao = note?.trim() || "Dados ou documentos necessitam de correcção.";
+      } else if (status === "aprovado") {
+        payload.motivo_rejeicao = null;
+        payload.nota_correcao = null;
+      }
+      const { error } = await supabase.from("perfis").update(payload).eq("id", id);
+      if (error) throw error;
+    }
+    await fallbackUserRepo.updateApproval(id, status, note);
   }
 
   async suspendUser(id: string, isSuspended: boolean): Promise<void> {
+    if (isSupabaseConfigured) {
+      const { error } = await supabase.from("perfis").update({ suspenso: isSuspended }).eq("id", id);
+      if (error) throw error;
+    }
     await fallbackUserRepo.suspendUser(id, isSuspended);
-    if (!isSupabaseConfigured) return;
-    try {
-      await supabase.from("perfis").update({ suspenso: isSuspended }).eq("id", id);
-    } catch {}
+  }
+
+  async setRole(id: string, role: UserRole): Promise<void> {
+    if (isSupabaseConfigured) {
+      const { error } = await supabase.from("perfis").update({ papel: role }).eq("id", id);
+      if (error) throw error;
+    }
+    await fallbackUserRepo.setRole(id, role);
   }
 
   async setPlan(id: string, planType: PlanType, durationDays = 30): Promise<void> {
-    await fallbackUserRepo.setPlan(id, planType, durationDays);
-    if (!isSupabaseConfigured) return;
     const expiresAt = planType === "gratis" ? null : new Date(Date.now() + durationDays * 86400000).toISOString();
-    try {
-      await supabase
+    if (isSupabaseConfigured) {
+      const { error } = await supabase
         .from("perfis")
         .update({ plano_tipo: planType, plano_expira_em: expiresAt })
         .eq("id", id);
-    } catch {}
+      if (error) throw error;
+    }
+    await fallbackUserRepo.setPlan(id, planType, durationDays);
   }
 
   async deleteAccount(id: string): Promise<void> {
@@ -634,6 +678,9 @@ export class SupabaseStoreRepo implements IStoreRepo {
       logo: s.logo_url || s.foto_fachada_url || "",
       cover: s.capa_url,
       isApproved: s.is_aprovada,
+      approvalStatus: s.estado_aprovacao || (s.is_aprovada ? "aprovado" : "pendente"),
+      rejectionReason: s.motivo_rejeicao || null,
+      correctionNote: s.nota_correcao || null,
       isSuspended: Boolean(s.suspensa),
       suspensionReason: s.motivo_suspensao,
       isVip: s.is_vip,
@@ -705,45 +752,62 @@ export class SupabaseStoreRepo implements IStoreRepo {
   }
 
   async toggleVip(id: string, isVip: boolean): Promise<void> {
-    await fallbackStoreRepo.toggleVip(id, isVip);
-    if (!isSupabaseConfigured) return;
-    try {
-      await supabase
+    if (isSupabaseConfigured) {
+      const { error } = await supabase
         .from("lojas")
         .update({ is_vip: isVip, plano_tipo: isVip ? "vip" : "gratis" })
         .eq("id", id);
-    } catch {}
+      if (error) throw error;
+    }
+    await fallbackStoreRepo.toggleVip(id, isVip);
   }
 
   async toggleApproval(id: string, isApproved: boolean): Promise<void> {
-    await fallbackStoreRepo.toggleApproval(id, isApproved);
-    if (!isSupabaseConfigured) return;
-    try {
-      await supabase.from("lojas").update({ is_aprovada: isApproved }).eq("id", id);
-    } catch {}
+    await this.updateApproval(id, isApproved ? "aprovado" : "pendente");
+  }
+
+  async updateApproval(id: string, status: ApprovalStatus, note?: string): Promise<void> {
+    const isApproved = status === "aprovado";
+    if (isSupabaseConfigured) {
+      const payload: Record<string, any> = {
+        is_aprovada: isApproved,
+        estado_aprovacao: status,
+      };
+      if (status === "rejeitado") {
+        payload.motivo_rejeicao = note?.trim() || "Documentação rejeitada pela moderação.";
+      } else if (status === "correcao") {
+        payload.nota_correcao = note?.trim() || "A documentação da loja precisa de correcção.";
+      } else if (status === "aprovado") {
+        payload.motivo_rejeicao = null;
+        payload.nota_correcao = null;
+      }
+      const { error } = await supabase.from("lojas").update(payload).eq("id", id);
+      if (error) throw error;
+    }
+    await fallbackStoreRepo.updateApproval(id, status, note);
   }
 
   async suspendStore(id: string, isSuspended: boolean, reason?: string): Promise<void> {
-    await fallbackStoreRepo.suspendStore(id, isSuspended, reason);
-    if (!isSupabaseConfigured) return;
-    try {
-      await supabase
+    if (isSupabaseConfigured) {
+      const { error } = await supabase
         .from("lojas")
         .update({ suspensa: isSuspended, motivo_suspensao: isSuspended ? reason || null : null })
         .eq("id", id);
-    } catch {}
+      if (error) throw error;
+    }
+    await fallbackStoreRepo.suspendStore(id, isSuspended, reason);
   }
 
   async setPlan(id: string, planType: PlanType, durationDays = 30): Promise<void> {
-    await fallbackStoreRepo.setPlan(id, planType, durationDays);
-    if (!isSupabaseConfigured) return;
     const expiresAt = planType === "gratis" ? null : new Date(Date.now() + durationDays * 86400000).toISOString();
-    try {
-      await supabase
+    if (isSupabaseConfigured) {
+      const { error } = await supabase
         .from("lojas")
         .update({ plano_tipo: planType, is_vip: planType === "vip", plano_expira_em: expiresAt })
         .eq("id", id);
-    } catch {}
+      if (error) throw error;
+    }
+    await fallbackStoreRepo.setPlan(id, planType, durationDays);
   }
 }
 
@@ -1404,6 +1468,10 @@ export class SupabaseSystemConfigRepo implements ISystemConfigRepo {
         ambulantVipPrice: Number(data.preco_plano_ambulante_vip ?? 9000),
         courierBasicPrice: Number(data.preco_plano_entregador_basico ?? 3000),
         courierVipPrice: Number(data.preco_plano_entregador_vip ?? 8000),
+        maintenanceMode: Boolean(data.modo_manutencao ?? false),
+        maintenanceMessage:
+          data.mensagem_manutencao ||
+          "Estamos em manutenção programada para melhorar o Mercado Uíge. Voltamos em breve.",
       };
       saveSystemConfig(cfg);
       return cfg;
@@ -1413,30 +1481,36 @@ export class SupabaseSystemConfigRepo implements ISystemConfigRepo {
   }
 
   async update(updates: Partial<SystemConfig>): Promise<SystemConfig> {
-    const local = await fallbackSystemConfigRepo.update(updates);
-    if (!isSupabaseConfigured) return local;
-    try {
-      await supabase
-        .from("configuracoes_sistema")
-        .upsert({
-          id: "global",
-          limite_denuncias_suspensao: local.autoSuspendReportsThreshold,
-          taxa_entrega_padrao: local.defaultDeliveryFee,
-          comissao_entrega_percent: local.deliveryCommissionPercent,
-          mensalidade_entregador: local.courierMonthlyFee,
-          preco_plano_basico: local.basicPlanPrice,
-          preco_plano_vip: local.vipPlanPrice,
-          whatsapp_admin: local.adminWhatsapp,
-          preco_plano_fixa_basico: local.fixedStoreBasicPrice,
-          preco_plano_fixa_vip: local.fixedStoreVipPrice,
-          preco_plano_ambulante_basico: local.ambulantBasicPrice,
-          preco_plano_ambulante_vip: local.ambulantVipPrice,
-          preco_plano_entregador_basico: local.courierBasicPrice,
-          preco_plano_entregador_vip: local.courierVipPrice,
-          actualizado_em: new Date().toISOString(),
-        });
-    } catch {}
-    return local;
+    const current = await this.get();
+    const merged = { ...current, ...updates };
+    if (isSupabaseConfigured) {
+      const payload: Record<string, any> = {
+        id: "global",
+        limite_denuncias_suspensao: merged.autoSuspendReportsThreshold,
+        taxa_entrega_padrao: merged.defaultDeliveryFee,
+        comissao_entrega_percent: merged.deliveryCommissionPercent,
+        mensalidade_entregador: merged.courierMonthlyFee,
+        preco_plano_basico: merged.basicPlanPrice,
+        preco_plano_vip: merged.vipPlanPrice,
+        whatsapp_admin: merged.adminWhatsapp,
+        preco_plano_fixa_basico: merged.fixedStoreBasicPrice,
+        preco_plano_fixa_vip: merged.fixedStoreVipPrice,
+        preco_plano_ambulante_basico: merged.ambulantBasicPrice,
+        preco_plano_ambulante_vip: merged.ambulantVipPrice,
+        preco_plano_entregador_basico: merged.courierBasicPrice,
+        preco_plano_entregador_vip: merged.courierVipPrice,
+        actualizado_em: new Date().toISOString(),
+      };
+      if (updates.maintenanceMode !== undefined) {
+        payload.modo_manutencao = Boolean(merged.maintenanceMode);
+      }
+      if (updates.maintenanceMessage !== undefined) {
+        payload.mensagem_manutencao = merged.maintenanceMessage || null;
+      }
+      const { error } = await supabase.from("configuracoes_sistema").upsert(payload);
+      if (error) throw error;
+    }
+    return fallbackSystemConfigRepo.update(updates);
   }
 }
 
@@ -1447,13 +1521,13 @@ export class SupabaseAuditRepo implements IAuditRepo {
     try {
       const { data, error } = await supabase
         .from("auditoria")
-        .select("*")
+        .select("*, perfis(email, nome)")
         .order("criado_em", { ascending: false });
       if (error || !data) return fallbackAuditRepo.getAll();
       return data.map((a: any) => ({
         id: a.id,
         adminId: a.admin_id,
-        adminEmail: a.admin_id,
+        adminEmail: a.perfis?.email || a.admin_id,
         action: a.acao,
         targetType: "recurso",
         targetId: a.alvo || "",
@@ -1476,6 +1550,216 @@ export class SupabaseAuditRepo implements IAuditRepo {
         detalhes: details || null,
       });
     } catch {}
+  }
+}
+
+// 13. SUPABASE EVENTOS DO SISTEMA (SOC — RLS SÓ SUPER_ADMIN)
+export class SupabaseSystemEventRepo implements ISystemEventRepo {
+  async getAll(): Promise<SystemEvent[]> {
+    if (!isSupabaseConfigured) return fallbackSystemEventRepo.getAll();
+    try {
+      const { data, error } = await supabase
+        .from("eventos_sistema")
+        .select("*")
+        .order("criado_em", { ascending: false })
+        .limit(200);
+      if (error || !data) return fallbackSystemEventRepo.getAll();
+      return data.map((e: any) => ({
+        id: e.id,
+        type: e.tipo,
+        severity: e.gravidade,
+        userId: e.utilizador_id,
+        userEmail: e.utilizador_email,
+        detail: e.detalhe,
+        resolved: Boolean(e.resolvido),
+        createdAt: e.criado_em,
+      }));
+    } catch {
+      return fallbackSystemEventRepo.getAll();
+    }
+  }
+
+  async record(event: {
+    type: string;
+    severity?: SystemEventSeverity;
+    userEmail?: string | null;
+    detail: string;
+  }): Promise<void> {
+    const safeType = sanitizeTelemetryText(event.type || "EVENTO_SISTEMA", 60) || "EVENTO_SISTEMA";
+    if (!allowTelemetryWrite(`soc:${safeType}`, 15)) return;
+
+    await fallbackSystemEventRepo.record({
+      ...event,
+      type: safeType,
+      detail: sanitizeTelemetryText(event.detail, 260),
+    });
+
+    if (!isSupabaseConfigured) return;
+    try {
+      await supabase.rpc("registrar_evento_sistema", {
+        p_tipo: safeType,
+        p_gravidade: event.severity || "info",
+        p_utilizador_email: event.userEmail ? sanitizeTelemetryText(event.userEmail, 120) : null,
+        p_detalhe: sanitizeTelemetryText(event.detail, 260),
+      });
+    } catch {}
+  }
+
+  async resolve(id: string, resolved = true): Promise<void> {
+    if (isSupabaseConfigured) {
+      const { error } = await supabase.from("eventos_sistema").update({ resolvido: resolved }).eq("id", id);
+      if (error) throw error;
+    }
+    await fallbackSystemEventRepo.resolve(id, resolved);
+  }
+}
+
+// 14. SUPABASE OBSERVABILIDADE DE ERROS (AGRUPADOS POR ECRÃ)
+export class SupabaseAppErrorRepo implements IAppErrorRepo {
+  async getAll(): Promise<AppErrorRecord[]> {
+    if (!isSupabaseConfigured) return fallbackAppErrorRepo.getAll();
+    try {
+      const { data, error } = await supabase
+        .from("erros_app")
+        .select("*")
+        .order("ultima_ocorrencia", { ascending: false })
+        .limit(100);
+      if (error || !data) return fallbackAppErrorRepo.getAll();
+      return data.map((e: any) => ({
+        id: e.id,
+        screen: e.ecra,
+        message: e.mensagem,
+        source: e.origem,
+        count: Number(e.contagem || 1),
+        durationMs: e.duracao_ms ?? null,
+        lastOccurredAt: e.ultima_ocorrencia,
+        createdAt: e.criado_em,
+      }));
+    } catch {
+      return fallbackAppErrorRepo.getAll();
+    }
+  }
+
+  async report(errorItem: {
+    screen: string;
+    message: string;
+    source?: string;
+    durationMs?: number;
+  }): Promise<void> {
+    const screen = sanitizeTelemetryText(errorItem.screen || "geral", 60) || "geral";
+    if (!allowTelemetryWrite(`err:${screen}`, 20)) return;
+    const message = sanitizeTelemetryText(errorItem.message || "Erro operacional", 160) || "Erro operacional";
+    const source = sanitizeTelemetryText(errorItem.source || "runtime", 40) || "runtime";
+
+    await fallbackAppErrorRepo.report({
+      screen,
+      message,
+      source,
+      durationMs: errorItem.durationMs,
+    });
+
+    if (!isSupabaseConfigured) return;
+    try {
+      await supabase.rpc("reportar_erro_app", {
+        p_ecra: screen,
+        p_mensagem: message,
+        p_origem: source,
+        p_duracao_ms: typeof errorItem.durationMs === "number" ? Math.round(errorItem.durationMs) : null,
+      });
+    } catch {}
+  }
+
+  async clearAll(): Promise<void> {
+    if (isSupabaseConfigured) {
+      const { error } = await supabase.from("erros_app").delete().neq("contagem", -1);
+      if (error) throw error;
+    }
+    await fallbackAppErrorRepo.clearAll();
+  }
+}
+
+// 15. SUPABASE SAÚDE NOC / ITOM
+export class SupabaseSystemHealthRepo implements ISystemHealthRepo {
+  async getMetrics(): Promise<SystemHealthMetrics> {
+    if (!isSupabaseConfigured) return fallbackSystemHealthRepo.getMetrics();
+    try {
+      const { data, error } = await supabase.rpc("get_system_health_metrics");
+      if (error || !data) return fallbackSystemHealthRepo.getMetrics();
+      return {
+        dbBytes: Number(data.dbBytes || 0),
+        storageBytes: Number(data.storageBytes || 0),
+        storageFiles: Number(data.storageFiles || 0),
+        totalUsers: Number(data.totalUsers || 0),
+        storesCount: Number(data.storesCount || 0),
+        productsCount: Number(data.productsCount || 0),
+        ordersCount: Number(data.ordersCount || 0),
+        pendingPayments: Number(data.pendingPayments || 0),
+        openSecurityAlerts: Number(data.openSecurityAlerts || 0),
+        errorGroups: Number(data.errorGroups || 0),
+        collectedAt: String(data.collectedAt || new Date().toISOString()),
+      };
+    } catch {
+      return fallbackSystemHealthRepo.getMetrics();
+    }
+  }
+
+  async runNocChecks(): Promise<NocServiceCheck[]> {
+    if (!isSupabaseConfigured) return fallbackSystemHealthRepo.runNocChecks();
+    const checkedAt = new Date().toISOString();
+
+    const probe = async (
+      id: NocServiceCheck["id"],
+      label: string,
+      fn: () => Promise<{ ok: boolean; detail: string }>
+    ): Promise<NocServiceCheck> => {
+      const start = performance.now();
+      try {
+        const res = await fn();
+        const latencyMs = Math.max(1, Math.round(performance.now() - start));
+        const status: NocServiceCheck["status"] = !res.ok
+          ? "indisponivel"
+          : latencyMs > 1500
+          ? "degradado"
+          : "operacional";
+        return { id, label, status, latencyMs, detail: res.detail, checkedAt };
+      } catch (err: any) {
+        const latencyMs = Math.max(1, Math.round(performance.now() - start));
+        return {
+          id,
+          label,
+          status: "indisponivel",
+          latencyMs,
+          detail: sanitizeTelemetryText(err?.message || "Falha na ligação", 100),
+          checkedAt,
+        };
+      }
+    };
+
+    const [dbCheck, authCheck, storageCheck, siteCheck] = await Promise.all([
+      probe("database", "Base de Dados", async () => {
+        const { error } = await supabase.from("configuracoes_sistema").select("id").limit(1);
+        return error ? { ok: false, detail: error.message } : { ok: true, detail: "PostgreSQL acessível" };
+      }),
+      probe("auth", "Login e OTP", async () => {
+        const { error } = await supabase.auth.getSession();
+        return error ? { ok: false, detail: error.message } : { ok: true, detail: "Supabase Auth activo" };
+      }),
+      probe("storage", "Storage de Fotos", async () => {
+        const { error } = await supabase.storage.from("produtos").list("", { limit: 1 });
+        return error ? { ok: false, detail: error.message } : { ok: true, detail: "Bucket produtos operacional" };
+      }),
+      probe("site", "Portal Web", async () => {
+        if (typeof window === "undefined" || typeof fetch === "undefined") {
+          return { ok: true, detail: "Servidor de aplicação activo" };
+        }
+        const resp = await fetch(window.location.origin, { method: "HEAD" });
+        return resp.ok
+          ? { ok: true, detail: `HTTP ${resp.status} disponível` }
+          : { ok: false, detail: `HTTP ${resp.status}` };
+      }),
+    ]);
+
+    return [dbCheck, authCheck, storageCheck, siteCheck];
   }
 }
 

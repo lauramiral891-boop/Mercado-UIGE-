@@ -14,6 +14,9 @@ import {
   CourierMonthlyFee,
   SystemConfig,
   AuditLogItem,
+  SystemEvent,
+  AppErrorRecord,
+  NocHistorySample,
 } from "../types";
 
 const STORAGE_KEYS = {
@@ -32,6 +35,9 @@ const STORAGE_KEYS = {
   COURIER_FEES: "mu_courier_fees_v1",
   SYSTEM_CONFIG: "mu_system_config_v1",
   AUDIT_LOGS: "mu_audit_logs_v1",
+  SYSTEM_EVENTS: "mu_system_events_v1",
+  APP_ERRORS: "mu_app_errors_v1",
+  NOC_HISTORY: "mu_noc_history_v1",
   LOCATION: "mu_location_v3",
   CART: "mu_cart_v3",
   FAVORITES: "mu_favorites_v3",
@@ -53,6 +59,8 @@ export const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
   ambulantVipPrice: 7500,
   courierBasicPrice: 3000,
   courierVipPrice: 8000,
+  maintenanceMode: false,
+  maintenanceMessage: "Estamos em manutenção programada para melhorar o Mercado Uíge. Voltamos em breve.",
 };
 
 export const DEFAULT_CATEGORIES: Category[] = [
@@ -135,6 +143,15 @@ export const saveSystemConfig = (cfg: SystemConfig) => setSafe(STORAGE_KEYS.SYST
 
 export const getStoredAuditLogs = (): AuditLogItem[] => getSafe<AuditLogItem[]>(STORAGE_KEYS.AUDIT_LOGS, []);
 export const saveAuditLogs = (logs: AuditLogItem[]) => setSafe(STORAGE_KEYS.AUDIT_LOGS, logs);
+
+export const getStoredSystemEvents = (): SystemEvent[] => getSafe<SystemEvent[]>(STORAGE_KEYS.SYSTEM_EVENTS, []);
+export const saveSystemEvents = (events: SystemEvent[]) => setSafe(STORAGE_KEYS.SYSTEM_EVENTS, events);
+
+export const getStoredAppErrors = (): AppErrorRecord[] => getSafe<AppErrorRecord[]>(STORAGE_KEYS.APP_ERRORS, []);
+export const saveAppErrors = (errors: AppErrorRecord[]) => setSafe(STORAGE_KEYS.APP_ERRORS, errors);
+
+export const getStoredNocHistory = (): NocHistorySample[] => getSafe<NocHistorySample[]>(STORAGE_KEYS.NOC_HISTORY, []);
+export const saveNocHistory = (history: NocHistorySample[]) => setSafe(STORAGE_KEYS.NOC_HISTORY, history);
 
 export const getStoredLocation = (): string => {
   try {

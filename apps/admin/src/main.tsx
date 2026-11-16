@@ -1,10 +1,10 @@
 import { createRoot } from "react-dom/client";
-import { ErrorBoundary } from "@mercado-uige/shared";
+import { AdminErrorBoundary } from "./components/AdminErrorBoundary";
 import { AdminApp } from "./App";
 import "@/index.css";
 
 createRoot(document.getElementById("root")!).render(
-  <ErrorBoundary>
+  <AdminErrorBoundary>
     <AdminApp />
-  </ErrorBoundary>
+  </AdminErrorBoundary>
 );

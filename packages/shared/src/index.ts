@@ -4,6 +4,7 @@ export * from "./lib/supabase";
 export * from "./lib/imageCompression";
 export * from "./lib/nativePlugins";
 export * from "./lib/storage";
+export * from "./lib/observability";
 export * from "./repositories";
 export * from "./components/ErrorBoundary";
 export * from "./components/SafeImage";

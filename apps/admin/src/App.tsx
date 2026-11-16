@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ShieldCheck,
   Users,
@@ -7,25 +7,24 @@ import {
   AlertCircle,
   Megaphone,
   CheckCircle2,
-  Trash2,
-  Crown,
   RefreshCw,
   LogOut,
   Mail,
   Lock,
   ArrowRight,
-  Search,
   FileText,
   Truck,
   CreditCard,
   LayoutDashboard,
-  Eye,
-  MousePointerClick,
-  Plus,
+  ClipboardCheck,
+  Settings,
+  Activity,
+  Menu,
   X,
 } from "lucide-react";
 import {
   User,
+  UserRole,
   Store as StoreType,
   Product,
   Order,
@@ -36,13 +35,12 @@ import {
   CourierMonthlyFee,
   SystemConfig,
   AdPosition,
-  fmtKz,
-  fmtDate,
-  fmtDateTime,
-  formatUserRole,
-  formatStoreType,
-  formatPlanType,
-  translateErrorMessage,
+  AuditLogItem,
+  SystemEvent,
+  AppErrorRecord,
+  SystemHealthMetrics,
+  NocServiceCheck,
+  NocHistorySample,
   DEFAULT_SYSTEM_CONFIG,
   userRepo,
   storeRepo,
@@ -54,67 +52,82 @@ import {
   deliveryRepo,
   systemConfigRepo,
   auditRepo,
-  AuditLogItem,
+  notificationRepo,
+  systemEventRepo,
+  appErrorRepo,
+  systemHealthRepo,
+  getStoredNocHistory,
+  saveNocHistory,
+  sanitizeTelemetryText,
   sendEmailOtp,
   verifyEmailOtp,
   supabase,
   isSupabaseConfigured,
   saveCurrentUser,
-  notificationRepo,
-  SafeImage,
+  translateErrorMessage,
+  formatUserRole,
+  isAnyAdminRole,
+  isSuperAdminRole,
 } from "@mercado-uige/shared";
+import { AdminSection, canAccessAdminSection } from "./lib/adminHelpers";
+import { appendNocHistorySample, OperationTiming } from "./lib/controlCenterHelpers";
+import { ConfirmModal } from "./components/ConfirmModal";
+import { OverviewSection } from "./components/OverviewSection";
+import { ApprovalsSection } from "./components/ApprovalsSection";
+import { OrdersSection } from "./components/OrdersSection";
+import { ConfigSection } from "./components/ConfigSection";
+import { ControlCenterSection } from "./components/ControlCenterSection";
+import {
+  StoresSection,
+  UsersSection,
+  PaymentsSection,
+  AdsSection,
+  DeliveriesSection,
+  ReportsSection,
+  AuditSection,
+} from "./components/OperationalSections";
 
-const AUDIT_ACTION_LABELS: Record<string, string> = {
-  LOGIN_ADMIN: "Acesso ao painel",
-  SUSPEND_USER: "Suspensão de utilizador",
-  UNSUSPEND_USER: "Reactivação de utilizador",
-  APPROVE_USER: "Aprovação de utilizador",
-  APPROVE_STORE: "Aprovação de loja",
-  SUSPEND_STORE: "Suspensão de loja",
-  UNSUSPEND_STORE: "Reactivação de loja",
-  SET_STORE_VIP: "Atribuição de selo VIP",
-  UNSET_STORE_VIP: "Remoção de selo VIP",
-  DELETE_PRODUCT: "Remoção de artigo",
-  RESOLVE_REPORT: "Resolução de denúncia",
-  SEND_BROADCAST: "Envio de aviso provincial",
-  REVIEW_PAYMENT: "Confirmação de pagamento",
-  REVIEW_AD: "Moderação de anúncio",
-  CREATE_AD: "Criação de anúncio patrocinado",
-  UPDATE_CONFIG: "Alteração de configurações",
-  REVIEW_COURIER_FEE: "Controlo de mensalidade",
+const INITIAL_METRICS: SystemHealthMetrics = {
+  dbBytes: 0,
+  storageBytes: 0,
+  storageFiles: 0,
+  totalUsers: 0,
+  storesCount: 0,
+  productsCount: 0,
+  ordersCount: 0,
+  pendingPayments: 0,
+  openSecurityAlerts: 0,
+  errorGroups: 0,
+  collectedAt: new Date().toISOString(),
 };
 
-type AdminSection =
-  | "resumo"
-  | "lojas"
-  | "utilizadores"
-  | "anuncios"
-  | "pagamentos"
-  | "denuncias"
-  | "entregadores"
-  | "auditoria";
-
-function formatAuditTarget(target?: string | null): string {
-  if (!target) return "—";
-  if (target === "painel_web") return "Painel Web";
-  if (target === "all_users") return "Todos os utilizadores";
-  if (target === "system_config") return "Configurações";
-  return target.length > 24 ? `${target.slice(0, 8)}…` : target;
+interface ConfirmState {
+  open: boolean;
+  title: string;
+  description: string;
+  confirmLabel: string;
+  tone: "danger" | "warning" | "primary";
+  requireReason?: boolean;
+  reasonLabel?: string;
+  reasonPlaceholder?: string;
+  action: (reason?: string) => Promise<void>;
 }
 
 export const AdminApp: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [activeTab, setActiveTab] = useState<AdminSection>("resumo");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Admin Login via OTP 6-digits
+  // Login OTP
   const [loginEmail, setLoginEmail] = useState("tvvibeoficial@gmail.com");
   const [otpCode, setOtpCode] = useState("");
   const [otpSent, setOtpSent] = useState(false);
+  const [otpAttemptsCount, setOtpAttemptsCount] = useState(0);
   const [resendTimer, setResendTimer] = useState(0);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState("");
 
-  // Data states
+  // Dados operacionais
   const [users, setUsers] = useState<User[]>([]);
   const [stores, setStores] = useState<StoreType[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -126,52 +139,139 @@ export const AdminApp: React.FC = () => {
   const [courierFees, setCourierFees] = useState<CourierMonthlyFee[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
   const [systemConfig, setSystemConfig] = useState<SystemConfig>(DEFAULT_SYSTEM_CONFIG);
-  const [configDraft, setConfigDraft] = useState<SystemConfig>(DEFAULT_SYSTEM_CONFIG);
-  const [totalRevenue, setTotalRevenue] = useState(0);
   const [loading, setLoading] = useState(false);
 
-  // Filters & inline modals
-  const [searchTerm, setSearchTerm] = useState("");
-  const [orderStatusFilter, setOrderStatusFilter] = useState<string>("todas");
-  const [storeFilter, setStoreFilter] = useState<"todas" | "pendentes" | "loja_fixa" | "vendedor_ambulante" | "suspensas">("todas");
-  const [broadcastTitle, setBroadcastTitle] = useState("");
-  const [broadcastBody, setBroadcastBody] = useState("");
-  const [pendingDeleteProduct, setPendingDeleteProduct] = useState<Product | null>(null);
+  // Centro de Controlo (só super_admin)
+  const [systemEvents, setSystemEvents] = useState<SystemEvent[]>([]);
+  const [appErrors, setAppErrors] = useState<AppErrorRecord[]>([]);
+  const [healthMetrics, setHealthMetrics] = useState<SystemHealthMetrics>(INITIAL_METRICS);
+  const [nocChecks, setNocChecks] = useState<NocServiceCheck[]>([]);
+  const [nocHistory, setNocHistory] = useState<NocHistorySample[]>(() => getStoredNocHistory());
+  const [nocRunning, setNocRunning] = useState(false);
+  const [operationTimings, setOperationTimings] = useState<OperationTiming[]>([]);
+
+  const activeTabRef = React.useRef<AdminSection>(activeTab);
+  activeTabRef.current = activeTab;
+
+  // Lightbox & Toast & Confirmação
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
-
-  // Admin Create Ad form
-  const [newAdTitle, setNewAdTitle] = useState("");
-  const [newAdSubtitle, setNewAdSubtitle] = useState("");
-  const [newAdStoreId, setNewAdStoreId] = useState("");
-  const [newAdPosition, setNewAdPosition] = useState<AdPosition>("topo");
-  const [newAdDays, setNewAdDays] = useState("15");
-
   const [toast, setToast] = useState<string | null>(null);
-  const showToast = (msg: string) => {
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  const [confirmLoading, setConfirmLoading] = useState(false);
+
+  const showToast = useCallback((msg: string) => {
     setToast(msg);
-    setTimeout(() => setToast(null), 3500);
-  };
+    setTimeout(() => {
+      setToast((prev) => (prev === msg ? null : prev));
+    }, 3800);
+  }, []);
+
+  const recordOperationTiming = useCallback((operation: string, durationMs: number, ok: boolean) => {
+    const entry: OperationTiming = {
+      id: `op-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      operation,
+      durationMs: Math.max(1, Math.round(durationMs)),
+      ok,
+      recordedAt: new Date().toISOString(),
+    };
+    setOperationTimings((prev) => [entry, ...prev].slice(0, 20));
+  }, []);
 
   useEffect(() => {
     userRepo.getCurrentUser().then((u) => {
-      if (u && u.role === "admin") {
+      if (u && isAnyAdminRole(u.role) && !u.isSuspended) {
         setCurrentUser(u);
       }
     });
   }, []);
 
   useEffect(() => {
-    let interval: any;
-    if (resendTimer > 0) {
-      interval = setInterval(() => setResendTimer((t) => t - 1), 1000);
-    }
+    if (typeof window === "undefined") return;
+    const handleWindowError = (ev: ErrorEvent) => {
+      const msg = sanitizeTelemetryText(ev.message || "Erro de execução no painel", 160);
+      appErrorRepo
+        .report({ screen: activeTabRef.current, message: msg, source: "window.error" })
+        .catch(() => {});
+    };
+    const handleUnhandledRejection = (ev: PromiseRejectionEvent) => {
+      const raw =
+        ev.reason instanceof Error
+          ? ev.reason.message
+          : typeof ev.reason === "string"
+          ? ev.reason
+          : "Falha assíncrona no painel";
+      appErrorRepo
+        .report({ screen: activeTabRef.current, message: sanitizeTelemetryText(raw, 160), source: "promise" })
+        .catch(() => {});
+    };
+    window.addEventListener("error", handleWindowError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+    return () => {
+      window.removeEventListener("error", handleWindowError);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (resendTimer <= 0) return;
+    const interval = setInterval(() => setResendTimer((t) => Math.max(0, t - 1)), 1000);
     return () => clearInterval(interval);
   }, [resendTimer]);
 
-  // Load admin data
-  const loadData = async () => {
-    setLoading(true);
+  const runNocProbes = useCallback(async () => {
+    setNocRunning(true);
+    const start = performance.now();
     try {
+      const checks = await systemHealthRepo.runNocChecks();
+      const elapsed = performance.now() - start;
+      setNocChecks(checks);
+      setNocHistory((prev) => {
+        const updated = appendNocHistorySample(prev, checks);
+        saveNocHistory(updated);
+        return updated;
+      });
+      recordOperationTiming("Sondas NOC", elapsed, true);
+    } catch (err: unknown) {
+      const elapsed = performance.now() - start;
+      recordOperationTiming("Sondas NOC", elapsed, false);
+      appErrorRepo
+        .report({
+          screen: "controlo_noc",
+          message: sanitizeTelemetryText(translateErrorMessage(err, "Falha nas sondas NOC"), 160),
+          source: "noc",
+          durationMs: Math.round(elapsed),
+        })
+        .catch(() => {});
+    } finally {
+      setNocRunning(false);
+    }
+  }, [recordOperationTiming]);
+
+  const refreshHealthMetrics = useCallback(async () => {
+    const start = performance.now();
+    try {
+      const m = await systemHealthRepo.getMetrics();
+      setHealthMetrics(m);
+      recordOperationTiming("Métricas ITOM", performance.now() - start, true);
+    } catch (err: unknown) {
+      const elapsed = performance.now() - start;
+      recordOperationTiming("Métricas ITOM", elapsed, false);
+      appErrorRepo
+        .report({
+          screen: "controlo_itom",
+          message: sanitizeTelemetryText(translateErrorMessage(err, "Falha ao recolher métricas ITOM"), 160),
+          source: "itom",
+          durationMs: Math.round(elapsed),
+        })
+        .catch(() => {});
+    }
+  }, [recordOperationTiming]);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    const start = performance.now();
+    try {
+      const isSuper = isSuperAdminRole(currentUser?.role);
       const [uList, sList, pList, oList, rList, adList, payList, delList, feeList, cfg, aList] =
         await Promise.all([
           userRepo.getAll(),
@@ -197,25 +297,52 @@ export const AdminApp: React.FC = () => {
       setDeliveries(delList);
       setCourierFees(feeList);
       setSystemConfig(cfg);
-      setConfigDraft(cfg);
       setAuditLogs(aList);
 
-      const rev = oList
-        .filter((o) => o.status !== "Cancelada")
-        .reduce((sum, o) => sum + Number(o.total || 0), 0);
-      setTotalRevenue(rev);
+      if (isSuper) {
+        const [evList, errList, mData] = await Promise.all([
+          systemEventRepo.getAll(),
+          appErrorRepo.getAll(),
+          systemHealthRepo.getMetrics(),
+        ]);
+        setSystemEvents(evList);
+        setAppErrors(errList);
+        setHealthMetrics(mData);
+      }
+
+      recordOperationTiming("Carregar Painel", performance.now() - start, true);
     } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível carregar os dados do painel."));
+      const elapsed = performance.now() - start;
+      recordOperationTiming("Carregar Painel", elapsed, false);
+      const msg = translateErrorMessage(err, "Não foi possível carregar os dados do painel.");
+      showToast(msg);
+      appErrorRepo
+        .report({
+          screen: activeTabRef.current,
+          message: sanitizeTelemetryText(msg, 160),
+          source: "loadData",
+          durationMs: Math.round(elapsed),
+        })
+        .catch(() => {});
     } finally {
       setLoading(false);
     }
-  };
+  }, [showToast, currentUser?.role, recordOperationTiming]);
 
   useEffect(() => {
-    if (currentUser && currentUser.role === "admin") {
+    if (currentUser && isAnyAdminRole(currentUser.role)) {
       loadData();
+      if (isSuperAdminRole(currentUser.role)) {
+        runNocProbes();
+      }
     }
-  }, [currentUser]);
+  }, [currentUser, loadData, runNocProbes]);
+
+  useEffect(() => {
+    if (currentUser && !canAccessAdminSection(currentUser.role, activeTab)) {
+      setActiveTab("resumo");
+    }
+  }, [currentUser, activeTab]);
 
   const handleSendOtp = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -227,11 +354,29 @@ export const AdminApp: React.FC = () => {
       return;
     }
 
+    const nextAttempts = otpAttemptsCount + 1;
+    setOtpAttemptsCount(nextAttempts);
+    if (nextAttempts > 3) {
+      await systemEventRepo.record({
+        type: "EXCESSO_PEDIDOS_OTP",
+        severity: "alta",
+        userEmail: cleanEmail,
+        detail: `Solicitação repetida de código OTP (${nextAttempts} pedidos) no painel admin.`,
+      });
+    }
+
     setLoginLoading(true);
     try {
       const { error } = await sendEmailOtp(cleanEmail);
       if (error) {
-        setLoginError(translateErrorMessage(error, "Não foi possível enviar o código de verificação."));
+        const msg = translateErrorMessage(error, "Não foi possível enviar o código de verificação.");
+        setLoginError(msg);
+        await systemEventRepo.record({
+          type: "ENVIO_OTP_ADMIN_FALHADO",
+          severity: "aviso",
+          userEmail: cleanEmail,
+          detail: msg,
+        });
       } else {
         setOtpCode("");
         setOtpSent(true);
@@ -247,6 +392,7 @@ export const AdminApp: React.FC = () => {
   const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError("");
+    const cleanLoginEmail = loginEmail.trim().toLowerCase();
 
     if (otpCode.length < 6) {
       setLoginError("O código deve ter 6 dígitos.");
@@ -255,206 +401,51 @@ export const AdminApp: React.FC = () => {
 
     setLoginLoading(true);
     try {
-      const { error } = await verifyEmailOtp(loginEmail, otpCode);
+      const { error } = await verifyEmailOtp(cleanLoginEmail, otpCode);
       if (error) {
-        setLoginError(translateErrorMessage(error, "Código inválido ou expirado."));
+        const msg = translateErrorMessage(error, "Código inválido ou expirado.");
+        setLoginError(msg);
+        await systemEventRepo.record({
+          type: "LOGIN_ADMIN_FALHADO",
+          severity: "alta",
+          userEmail: cleanLoginEmail,
+          detail: `Falha ao validar código OTP no painel: ${msg}`,
+        });
         setLoginLoading(false);
         return;
       }
 
-      const cleanLoginEmail = loginEmail.trim().toLowerCase();
       let matched = await userRepo.getCurrentUser();
       if (!matched || matched.email.toLowerCase() !== cleanLoginEmail) {
         const allUsers = await userRepo.getAll();
         matched = allUsers.find((u) => u.email.toLowerCase() === cleanLoginEmail) || null;
       }
 
-      if (!matched || matched.role !== "admin") {
+      if (!matched || !isAnyAdminRole(matched.role) || matched.isSuspended) {
         if (isSupabaseConfigured) {
           await supabase.auth.signOut();
         }
-        setLoginError("Acesso restrito. Esta conta não tem permissões de Administrador.");
+        await systemEventRepo.record({
+          type: "ACESSO_NAO_AUTORIZADO",
+          severity: "critica",
+          userEmail: cleanLoginEmail,
+          detail: "Tentativa de entrada no painel administrativo com conta sem papel administrativo ou suspensa.",
+        });
+        setLoginError("Acesso restrito. Esta conta não tem permissões de equipa administrativa.");
         setLoginLoading(false);
         return;
       }
 
       setCurrentUser(matched);
-      await auditRepo.log(matched.id, "LOGIN_ADMIN", "painel_web", { email: matched.email });
+      setOtpAttemptsCount(0);
+      await auditRepo.log(matched.id, "LOGIN_ADMIN", "painel_web", {
+        email: matched.email,
+        role: matched.role,
+      });
     } catch (err: unknown) {
       setLoginError(translateErrorMessage(err, "Não foi possível validar o acesso."));
     } finally {
       setLoginLoading(false);
-    }
-  };
-
-  // Actions
-  const handleToggleSuspendUser = async (targetUser: User) => {
-    if (!currentUser) return;
-    try {
-      const newStatus = !targetUser.isSuspended;
-      await userRepo.suspendUser(targetUser.id, newStatus);
-      await auditRepo.log(currentUser.id, newStatus ? "SUSPEND_USER" : "UNSUSPEND_USER", targetUser.id);
-      showToast(newStatus ? "Utilizador suspenso." : "Utilizador reactivado.");
-      loadData();
-    } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível actualizar o estado do utilizador."));
-    }
-  };
-
-  const handleApproveUser = async (targetUser: User, approved: boolean) => {
-    if (!currentUser) return;
-    try {
-      await userRepo.approveUser(targetUser.id, approved);
-      await auditRepo.log(currentUser.id, "APPROVE_USER", targetUser.id, { approved });
-      showToast(approved ? "Conta aprovada com sucesso." : "Aprovação revogada.");
-      loadData();
-    } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível actualizar a aprovação."));
-    }
-  };
-
-  const handleToggleStoreVip = async (store: StoreType) => {
-    if (!currentUser) return;
-    try {
-      const newVip = !store.isVip;
-      await storeRepo.toggleVip(store.id, newVip);
-      await auditRepo.log(currentUser.id, newVip ? "SET_STORE_VIP" : "UNSET_STORE_VIP", store.id);
-      showToast(newVip ? "Selo VIP atribuído à loja." : "Selo VIP removido.");
-      loadData();
-    } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível actualizar o selo VIP."));
-    }
-  };
-
-  const handleApproveStore = async (store: StoreType, approved: boolean) => {
-    if (!currentUser) return;
-    try {
-      await storeRepo.toggleApproval(store.id, approved);
-      await auditRepo.log(currentUser.id, "APPROVE_STORE", store.id, { approved });
-      showToast(approved ? `Loja ${store.name} aprovada!` : "Loja marcada como pendente.");
-      loadData();
-    } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível aprovar a loja."));
-    }
-  };
-
-  const handleSuspendStore = async (store: StoreType) => {
-    if (!currentUser) return;
-    try {
-      const next = !store.isSuspended;
-      await storeRepo.suspendStore(store.id, next, next ? "Suspensa pela administração" : undefined);
-      await auditRepo.log(currentUser.id, next ? "SUSPEND_STORE" : "UNSUSPEND_STORE", store.id);
-      showToast(next ? "Loja suspensa." : "Loja reactivada.");
-      loadData();
-    } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível alterar a suspensão da loja."));
-    }
-  };
-
-  const handleConfirmRemoveProduct = async () => {
-    if (!currentUser || !pendingDeleteProduct) return;
-    try {
-      await productRepo.delete(pendingDeleteProduct.id);
-      await auditRepo.log(currentUser.id, "DELETE_PRODUCT", pendingDeleteProduct.id, {
-        name: pendingDeleteProduct.name,
-      });
-      setPendingDeleteProduct(null);
-      showToast("Artigo removido do catálogo provincial.");
-      loadData();
-    } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível remover o artigo."));
-    }
-  };
-
-  const handleResolveReport = async (report: ReportItem, status: "resolvido" | "rejeitado" = "resolvido") => {
-    if (!currentUser) return;
-    try {
-      await reportRepo.resolve(report.id, status);
-      await auditRepo.log(currentUser.id, "RESOLVE_REPORT", report.id, { status });
-      showToast(status === "resolvido" ? "Denúncia marcada como resolvida." : "Denúncia rejeitada.");
-      loadData();
-    } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível actualizar a denúncia."));
-    }
-  };
-
-  const handleSendBroadcast = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!currentUser || !broadcastTitle.trim() || !broadcastBody.trim()) return;
-
-    try {
-      await notificationRepo.create({
-        userId: "all",
-        title: broadcastTitle.trim(),
-        body: broadcastBody.trim(),
-        type: "system",
-      });
-
-      await auditRepo.log(currentUser.id, "SEND_BROADCAST", "all_users", { title: broadcastTitle.trim() });
-      setBroadcastTitle("");
-      setBroadcastBody("");
-      showToast("Aviso enviado a todos os utilizadores.");
-      loadData();
-    } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível enviar o aviso."));
-    }
-  };
-
-  const handleSaveSystemConfig = async (updates: Partial<SystemConfig>, successMsg: string) => {
-    if (!currentUser) return;
-    try {
-      const updated = await systemConfigRepo.update(updates);
-      setSystemConfig(updated);
-      setConfigDraft(updated);
-      await auditRepo.log(currentUser.id, "UPDATE_CONFIG", "system_config", updates);
-      showToast(successMsg);
-    } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível guardar as configurações."));
-    }
-  };
-
-  const handleCreateAdminAd = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!currentUser || !newAdTitle.trim()) return;
-    try {
-      const st = stores.find((s) => s.id === newAdStoreId);
-      const days = Math.max(1, Number(newAdDays || 15));
-      await adRepo.create({
-        sellerId: st?.ownerId || currentUser.id,
-        storeId: st?.id,
-        storeName: st?.name || "Mercado Uíge",
-        title: newAdTitle.trim(),
-        subtitle: newAdSubtitle.trim(),
-        imageUrl: st?.facadeImage || st?.logo || "",
-        position: newAdPosition,
-        startDate: new Date().toISOString(),
-        endDate: new Date(Date.now() + days * 86400000).toISOString(),
-        active: true,
-        status: "aprovado",
-      });
-      await auditRepo.log(currentUser.id, "CREATE_AD", st?.id || "global", { title: newAdTitle.trim() });
-      setNewAdTitle("");
-      setNewAdSubtitle("");
-      showToast("Anúncio patrocinado publicado e activo!");
-      loadData();
-    } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível criar o anúncio."));
-    }
-  };
-
-  const handleReviewPayment = async (pay: MerchantPayment, status: "confirmado" | "rejeitado") => {
-    if (!currentUser) return;
-    try {
-      await paymentRepo.review(pay.id, status);
-      await auditRepo.log(currentUser.id, "REVIEW_PAYMENT", pay.id, { status, type: pay.type });
-      showToast(
-        status === "confirmado"
-          ? "Pagamento confirmado e plano/anúncio activado automaticamente!"
-          : "Pagamento rejeitado."
-      );
-      loadData();
-    } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível processar o pagamento."));
     }
   };
 
@@ -466,10 +457,603 @@ export const AdminApp: React.FC = () => {
     setCurrentUser(null);
     setOtpSent(false);
     setOtpCode("");
+    setMobileMenuOpen(false);
   };
 
-  // Login screen
-  if (!currentUser || currentUser.role !== "admin") {
+  const openConfirm = (cfg: Omit<ConfirmState, "open">) => {
+    setConfirmState({ ...cfg, open: true });
+  };
+
+  const handleRunConfirmedAction = async (reason?: string) => {
+    if (!confirmState) return;
+    setConfirmLoading(true);
+    const start = performance.now();
+    try {
+      await confirmState.action(reason);
+      recordOperationTiming(confirmState.confirmLabel, performance.now() - start, true);
+      setConfirmState(null);
+      await loadData();
+    } catch (err: unknown) {
+      const elapsed = performance.now() - start;
+      recordOperationTiming(confirmState.confirmLabel, elapsed, false);
+      const msg = translateErrorMessage(err, "Não foi possível concluir a operação.");
+      showToast(msg);
+      appErrorRepo
+        .report({
+          screen: activeTabRef.current,
+          message: sanitizeTelemetryText(msg, 160),
+          source: "action",
+          durationMs: Math.round(elapsed),
+        })
+        .catch(() => {});
+    } finally {
+      setConfirmLoading(false);
+    }
+  };
+
+  // Acções de moderação e aprovação com confirmação + auditoria
+  const requestApproveEntry = (entry: { kind: "loja" | "utilizador"; store?: StoreType; user?: User }) => {
+    if (!currentUser) return;
+    if (entry.kind === "loja" && entry.store) {
+      const st = entry.store;
+      openConfirm({
+        title: `Aprovar loja "${st.name}"?`,
+        description: `A loja (${st.code || "LJ"}) ficará visível para todos os clientes no Uíge.`,
+        confirmLabel: "Aprovar Loja",
+        tone: "primary",
+        action: async () => {
+          await storeRepo.updateApproval(st.id, "aprovado");
+          await auditRepo.log(currentUser.id, "APPROVE_STORE", `${st.name} (${st.code || st.id})`);
+          await notificationRepo.create({
+            userId: st.ownerId,
+            title: "Loja aprovada no Mercado Uíge",
+            body: `A tua loja "${st.name}" foi aprovada e já está activa para vendas.`,
+            type: "info",
+          });
+          showToast(`Loja ${st.name} aprovada.`);
+        },
+      });
+    } else if (entry.kind === "utilizador" && entry.user) {
+      const usr = entry.user;
+      openConfirm({
+        title: `Aprovar conta de ${usr.name}?`,
+        description: `O utilizador (${usr.code || "CL"} · ${formatUserRole(usr.role)}) poderá operar normalmente na plataforma.`,
+        confirmLabel: "Aprovar Conta",
+        tone: "primary",
+        action: async () => {
+          await userRepo.updateApproval(usr.id, "aprovado");
+          await auditRepo.log(currentUser.id, "APPROVE_USER", `${usr.name} (${usr.code || usr.id})`);
+          await notificationRepo.create({
+            userId: usr.id,
+            title: "Conta aprovada",
+            body: "A tua conta profissional no Mercado Uíge foi verificada e aprovada.",
+            type: "info",
+          });
+          showToast(`Conta de ${usr.name} aprovada.`);
+        },
+      });
+    }
+  };
+
+  const requestRejectEntry = (entry: { kind: "loja" | "utilizador"; store?: StoreType; user?: User }) => {
+    if (!currentUser) return;
+    if (entry.kind === "loja" && entry.store) {
+      const st = entry.store;
+      openConfirm({
+        title: `Rejeitar loja "${st.name}"`,
+        description: "A loja permanecerá inactiva e o comerciante receberá o motivo por notificação.",
+        confirmLabel: "Confirmar Rejeição",
+        tone: "danger",
+        requireReason: true,
+        reasonLabel: "Motivo da rejeição *",
+        reasonPlaceholder: "Ex.: Foto da fachada ilegível ou morada incompleta no Uíge...",
+        action: async (reason) => {
+          await storeRepo.updateApproval(st.id, "rejeitado", reason);
+          await auditRepo.log(currentUser.id, "REJECT_STORE", `${st.name} (${st.code || st.id})`, { reason });
+          await notificationRepo.create({
+            userId: st.ownerId,
+            title: "Pedido de loja rejeitado",
+            body: `A loja "${st.name}" não foi aprovada: ${reason}`,
+            type: "security",
+          });
+          showToast("Loja rejeitada e registada na auditoria.");
+        },
+      });
+    } else if (entry.kind === "utilizador" && entry.user) {
+      const usr = entry.user;
+      openConfirm({
+        title: `Rejeitar conta de ${usr.name}`,
+        description: "O utilizador não será activado como comerciante/entregador e verá o motivo.",
+        confirmLabel: "Confirmar Rejeição",
+        tone: "danger",
+        requireReason: true,
+        reasonLabel: "Motivo da rejeição *",
+        reasonPlaceholder: "Ex.: Foto do Bilhete de Identidade incompatível...",
+        action: async (reason) => {
+          await userRepo.updateApproval(usr.id, "rejeitado", reason);
+          await auditRepo.log(currentUser.id, "REJECT_USER", `${usr.name} (${usr.code || usr.id})`, { reason });
+          await notificationRepo.create({
+            userId: usr.id,
+            title: "Cadastro não aprovado",
+            body: `O teu pedido de conta não foi aprovado: ${reason}`,
+            type: "security",
+          });
+          showToast("Conta rejeitada.");
+        },
+      });
+    }
+  };
+
+  const requestCorrectionEntry = (entry: { kind: "loja" | "utilizador"; store?: StoreType; user?: User }) => {
+    if (!currentUser) return;
+    if (entry.kind === "loja" && entry.store) {
+      const st = entry.store;
+      openConfirm({
+        title: `Pedir correcção para "${st.name}"`,
+        description: "Informa exactamente o que o comerciante precisa corrigir (BI, foto da fachada ou bairro).",
+        confirmLabel: "Enviar Pedido de Correcção",
+        tone: "warning",
+        requireReason: true,
+        reasonLabel: "Instruções de correcção *",
+        reasonPlaceholder: "Ex.: Envia uma foto mais nítida da fachada e confirma o bairro...",
+        action: async (reason) => {
+          await storeRepo.updateApproval(st.id, "correcao", reason);
+          await auditRepo.log(currentUser.id, "REQUEST_CORRECTION_STORE", `${st.name} (${st.code || st.id})`, {
+            reason,
+          });
+          await notificationRepo.create({
+            userId: st.ownerId,
+            title: "Correcção solicitada na tua loja",
+            body: `A moderação pediu uma correcção em "${st.name}": ${reason}`,
+            type: "info",
+          });
+          showToast("Pedido de correcção enviado ao comerciante.");
+        },
+      });
+    } else if (entry.kind === "utilizador" && entry.user) {
+      const usr = entry.user;
+      openConfirm({
+        title: `Pedir correcção a ${usr.name}`,
+        description: "O utilizador será notificado sobre os documentos ou dados que precisa reenviar.",
+        confirmLabel: "Enviar Pedido",
+        tone: "warning",
+        requireReason: true,
+        reasonLabel: "Dados ou documentos a corrigir *",
+        reasonPlaceholder: "Ex.: Carrega novamente a foto do BI frente e verso...",
+        action: async (reason) => {
+          await userRepo.updateApproval(usr.id, "correcao", reason);
+          await auditRepo.log(currentUser.id, "REQUEST_CORRECTION_USER", `${usr.name} (${usr.code || usr.id})`, {
+            reason,
+          });
+          await notificationRepo.create({
+            userId: usr.id,
+            title: "Correcção necessária no cadastro",
+            body: `A moderação pediu uma correcção na tua conta: ${reason}`,
+            type: "info",
+          });
+          showToast("Pedido de correcção enviado.");
+        },
+      });
+    }
+  };
+
+  const requestSuspendStore = (store: StoreType) => {
+    if (!currentUser) return;
+    const suspending = !store.isSuspended;
+    openConfirm({
+      title: suspending ? `Suspender loja "${store.name}"?` : `Reactivar loja "${store.name}"?`,
+      description: suspending
+        ? "A loja e os seus artigos deixarão de aparecer imediatamente para os clientes."
+        : "A loja voltará a ficar operacional para receber encomendas.",
+      confirmLabel: suspending ? "Suspender Loja" : "Reactivar Loja",
+      tone: suspending ? "danger" : "primary",
+      requireReason: suspending,
+      reasonLabel: "Motivo da suspensão *",
+      action: async (reason) => {
+        await storeRepo.suspendStore(store.id, suspending, reason || undefined);
+        await auditRepo.log(
+          currentUser.id,
+          suspending ? "SUSPEND_STORE" : "UNSUSPEND_STORE",
+          `${store.name} (${store.code || store.id})`,
+          reason ? { reason } : undefined
+        );
+        showToast(suspending ? "Loja suspensa." : "Loja reactivada.");
+      },
+    });
+  };
+
+  const requestToggleVip = (store: StoreType) => {
+    if (!currentUser) return;
+    const nextVip = !store.isVip;
+    openConfirm({
+      title: nextVip ? `Atribuir selo VIP a "${store.name}"?` : `Remover selo VIP de "${store.name}"?`,
+      description: nextVip
+        ? "A loja passará a ter destaque prioritário no Mercado Uíge."
+        : "A loja deixará de apresentar o selo VIP aos compradores.",
+      confirmLabel: nextVip ? "Atribuir VIP" : "Remover VIP",
+      tone: nextVip ? "primary" : "warning",
+      action: async () => {
+        await storeRepo.toggleVip(store.id, nextVip);
+        await auditRepo.log(
+          currentUser.id,
+          nextVip ? "SET_STORE_VIP" : "UNSET_STORE_VIP",
+          `${store.name} (${store.code || store.id})`
+        );
+        showToast(nextVip ? "Selo VIP atribuído." : "Selo VIP removido.");
+      },
+    });
+  };
+
+  const requestSuspendUser = (targetUser: User) => {
+    if (!currentUser) return;
+    const suspending = !targetUser.isSuspended;
+    openConfirm({
+      title: suspending ? `Suspender conta de ${targetUser.name}?` : `Reactivar conta de ${targetUser.name}?`,
+      description: suspending
+        ? "O utilizador perderá acesso às funcionalidades de venda, entrega e checkout."
+        : "A conta voltará a ter acesso normal.",
+      confirmLabel: suspending ? "Suspender Conta" : "Reactivar Conta",
+      tone: suspending ? "danger" : "primary",
+      requireReason: suspending,
+      reasonLabel: "Motivo da suspensão *",
+      action: async (reason) => {
+        await userRepo.suspendUser(targetUser.id, suspending);
+        await auditRepo.log(
+          currentUser.id,
+          suspending ? "SUSPEND_USER" : "UNSUSPEND_USER",
+          `${targetUser.name} (${targetUser.email})`,
+          reason ? { reason } : undefined
+        );
+        showToast(suspending ? "Utilizador suspenso." : "Utilizador reactivado.");
+      },
+    });
+  };
+
+  const requestDeleteProduct = (product: Product) => {
+    if (!currentUser) return;
+    openConfirm({
+      title: `Remover artigo "${product.name}"?`,
+      description: "Esta acção elimina o artigo permanentemente do catálogo provincial e regista na auditoria.",
+      confirmLabel: "Remover Artigo",
+      tone: "danger",
+      requireReason: true,
+      reasonLabel: "Motivo da remoção *",
+      action: async (reason) => {
+        await productRepo.delete(product.id);
+        await auditRepo.log(currentUser.id, "DELETE_PRODUCT", product.name, { productId: product.id, reason });
+        showToast("Artigo removido do catálogo.");
+      },
+    });
+  };
+
+  const requestConfirmPayment = (pay: MerchantPayment) => {
+    if (!currentUser) return;
+    openConfirm({
+      title: "Confirmar pagamento e activar plano/anúncio?",
+      description: `Valor de ${pay.amountKz.toLocaleString("pt-AO")} Kz (${pay.method}) para ${pay.storeName || pay.sellerName || "comerciante"}.`,
+      confirmLabel: "Confirmar Pagamento",
+      tone: "primary",
+      action: async () => {
+        await paymentRepo.review(pay.id, "confirmado");
+        await auditRepo.log(currentUser.id, "REVIEW_PAYMENT", pay.storeName || pay.id, {
+          status: "confirmado",
+          amountKz: pay.amountKz,
+        });
+        showToast("Pagamento confirmado e activado automaticamente.");
+      },
+    });
+  };
+
+  const requestRejectPayment = (pay: MerchantPayment) => {
+    if (!currentUser) return;
+    openConfirm({
+      title: "Rejeitar comprovativo de pagamento?",
+      description: "O plano ou anúncio não será activado e o utilizador poderá enviar novo comprovativo.",
+      confirmLabel: "Rejeitar Pagamento",
+      tone: "danger",
+      requireReason: true,
+      reasonLabel: "Motivo da rejeição *",
+      action: async (reason) => {
+        await paymentRepo.review(pay.id, "rejeitado");
+        await auditRepo.log(currentUser.id, "REVIEW_PAYMENT", pay.storeName || pay.id, {
+          status: "rejeitado",
+          reason,
+        });
+        await notificationRepo.create({
+          userId: pay.sellerId,
+          title: "Comprovativo não validado",
+          body: `O pagamento de ${pay.amountKz} Kz foi rejeitado: ${reason}`,
+          type: "security",
+        });
+        showToast("Pagamento rejeitado.");
+      },
+    });
+  };
+
+  const requestToggleAd = (ad: SponsoredAd, nextActive: boolean) => {
+    if (!currentUser) return;
+    openConfirm({
+      title: nextActive ? `Activar anúncio "${ad.title}"?` : `Pausar anúncio "${ad.title}"?`,
+      description: nextActive
+        ? "O anúncio voltará a ser exibido no carrossel patrocinado dentro da validade."
+        : "O anúncio deixará de aparecer aos compradores enquanto estiver pausado.",
+      confirmLabel: nextActive ? "Activar Anúncio" : "Pausar Anúncio",
+      tone: nextActive ? "primary" : "warning",
+      action: async () => {
+        await adRepo.updateStatus(ad.id, nextActive ? "aprovado" : ad.status, nextActive);
+        await auditRepo.log(currentUser.id, "REVIEW_AD", ad.title, { active: nextActive });
+        showToast(nextActive ? "Anúncio activado." : "Anúncio pausado.");
+      },
+    });
+  };
+
+  const requestDeleteAd = (ad: SponsoredAd) => {
+    if (!currentUser) return;
+    openConfirm({
+      title: `Eliminar anúncio "${ad.title}"?`,
+      description: "A campanha patrocinada será apagada em definitivo.",
+      confirmLabel: "Eliminar Anúncio",
+      tone: "danger",
+      action: async () => {
+        await adRepo.delete(ad.id);
+        await auditRepo.log(currentUser.id, "DELETE_AD", ad.title, { adId: ad.id });
+        showToast("Anúncio eliminado.");
+      },
+    });
+  };
+
+  const requestConfirmMonthlyFee = (fee: CourierMonthlyFee) => {
+    if (!currentUser) return;
+    openConfirm({
+      title: `Confirmar mensalidade de ${fee.courierName || "Entregador"}?`,
+      description: `Referente ao mês ${fee.referenceMonth} no valor de ${fee.amountKz} Kz.`,
+      confirmLabel: "Marcar como Pago",
+      tone: "primary",
+      action: async () => {
+        await deliveryRepo.updateMonthlyFeeStatus(fee.id, "pago");
+        await auditRepo.log(currentUser.id, "REVIEW_COURIER_FEE", fee.courierName || fee.id, {
+          month: fee.referenceMonth,
+          amountKz: fee.amountKz,
+        });
+        showToast("Mensalidade marcada como paga.");
+      },
+    });
+  };
+
+  const requestResolveReport = (report: ReportItem, status: "resolvido" | "rejeitado") => {
+    if (!currentUser) return;
+    openConfirm({
+      title: status === "resolvido" ? "Marcar denúncia como resolvida?" : "Rejeitar denúncia?",
+      description: `Alvo: ${report.storeName || report.productName || "Denúncia"} — "${report.reason}"`,
+      confirmLabel: status === "resolvido" ? "Marcar Resolvida" : "Rejeitar Denúncia",
+      tone: status === "resolvido" ? "primary" : "warning",
+      action: async () => {
+        await reportRepo.resolve(report.id, status);
+        await auditRepo.log(currentUser.id, "RESOLVE_REPORT", report.storeName || report.productName || report.id, {
+          status,
+        });
+        showToast(status === "resolvido" ? "Denúncia resolvida." : "Denúncia rejeitada.");
+      },
+    });
+  };
+
+  const requestSaveConfig = (updates: Partial<SystemConfig>, summaryLabel: string) => {
+    if (!currentUser) return;
+    openConfirm({
+      title: "Guardar novas configurações globais?",
+      description: summaryLabel,
+      confirmLabel: "Guardar Configurações",
+      tone: "primary",
+      action: async () => {
+        const updated = await systemConfigRepo.update(updates);
+        setSystemConfig(updated);
+        await auditRepo.log(currentUser.id, "UPDATE_CONFIG", "system_config", updates);
+        showToast("Configurações guardadas no servidor.");
+      },
+    });
+  };
+
+  const requestChangeRole = (targetUser: User, nextRole: UserRole) => {
+    if (!currentUser) return;
+    openConfirm({
+      title: `Alterar papel de ${targetUser.name}?`,
+      description: `O acesso será alterado de "${formatUserRole(targetUser.role)}" para "${formatUserRole(nextRole)}" com aplicação por RLS.`,
+      confirmLabel: "Alterar Papel",
+      tone: "warning",
+      requireReason: true,
+      reasonLabel: "Justificação para auditoria *",
+      action: async (reason) => {
+        try {
+          await userRepo.setRole(targetUser.id, nextRole);
+          await auditRepo.log(currentUser.id, "CHANGE_ROLE", `${targetUser.email} -> ${nextRole}`, { reason });
+          showToast(`Papel de ${targetUser.name} actualizado para ${formatUserRole(nextRole)}.`);
+        } catch (err: unknown) {
+          await systemEventRepo.record({
+            type: "TENTATIVA_ALTERAR_PAPEL",
+            severity: "critica",
+            userEmail: currentUser.email,
+            detail: `Tentativa bloqueada ao alterar papel de ${targetUser.email} para ${nextRole}.`,
+          });
+          throw err;
+        }
+      },
+    });
+  };
+
+  const handleSendBroadcast = async (title: string, body: string) => {
+    if (!currentUser) return;
+    await notificationRepo.create({
+      userId: "all",
+      title,
+      body,
+      type: "system",
+    });
+    await auditRepo.log(currentUser.id, "SEND_BROADCAST", "all_users", { title });
+    showToast("Aviso provincial enviado.");
+    await loadData();
+  };
+
+  const handleCreateAdminAd = async (payload: {
+    title: string;
+    subtitle: string;
+    storeId: string;
+    position: AdPosition;
+    days: number;
+  }) => {
+    if (!currentUser) return;
+    const st = stores.find((s) => s.id === payload.storeId);
+    await adRepo.create({
+      sellerId: st?.ownerId || currentUser.id,
+      storeId: st?.id,
+      storeName: st?.name || "Mercado Uíge",
+      title: payload.title,
+      subtitle: payload.subtitle,
+      imageUrl: st?.facadeImage || st?.logo || "",
+      position: payload.position,
+      startDate: new Date().toISOString(),
+      endDate: new Date(Date.now() + payload.days * 86400000).toISOString(),
+      active: true,
+      status: "aprovado",
+    });
+    await auditRepo.log(currentUser.id, "CREATE_AD", st?.name || "global", { title: payload.title });
+    showToast("Anúncio patrocinado publicado!");
+    await loadData();
+  };
+
+  // Acções exclusivas do Centro de Controlo (super_admin)
+  const requestToggleMaintenance = (nextMode: boolean, message: string) => {
+    if (!currentUser) return;
+    openConfirm({
+      title: nextMode ? "Activar Modo de Manutenção?" : "Desactivar Modo de Manutenção?",
+      description: nextMode
+        ? "Os utilizadores verão o aviso de manutenção programada enquanto este modo estiver activo."
+        : "A plataforma voltará imediatamente à operação normal.",
+      confirmLabel: nextMode ? "Activar Manutenção" : "Repor Operação Normal",
+      tone: nextMode ? "warning" : "primary",
+      action: async () => {
+        const updated = await systemConfigRepo.update({
+          maintenanceMode: nextMode,
+          maintenanceMessage: message || systemConfig.maintenanceMessage,
+        });
+        setSystemConfig(updated);
+        await auditRepo.log(currentUser.id, "TOGGLE_MAINTENANCE", "system_config", {
+          maintenanceMode: nextMode,
+        });
+        await systemEventRepo.record({
+          type: "MODO_MANUTENCAO",
+          severity: nextMode ? "alta" : "info",
+          userEmail: currentUser.email,
+          detail: nextMode ? "Modo de manutenção activado no Centro de Comando." : "Modo de manutenção desactivado.",
+        });
+        showToast(nextMode ? "Modo de manutenção activado." : "Sistema reposto em operação normal.");
+      },
+    });
+  };
+
+  const handleResolveSystemEvent = async (ev: SystemEvent) => {
+    try {
+      await systemEventRepo.resolve(ev.id, true);
+      showToast("Alerta marcado como resolvido.");
+      await loadData();
+    } catch (err: unknown) {
+      showToast(translateErrorMessage(err, "Não foi possível resolver o alerta."));
+    }
+  };
+
+  const requestBlockUserFromSoc = (targetUser: User, ev: SystemEvent) => {
+    if (!currentUser) return;
+    openConfirm({
+      title: `Bloquear conta "${targetUser.name}" via SOC?`,
+      description: `Suspende imediatamente a conta (${targetUser.email}) associada ao evento "${ev.type}" e resolve o alerta.`,
+      confirmLabel: "Bloquear Conta",
+      tone: "danger",
+      requireReason: true,
+      reasonLabel: "Motivo de segurança *",
+      action: async (reason) => {
+        await userRepo.suspendUser(targetUser.id, true);
+        await systemEventRepo.resolve(ev.id, true);
+        await auditRepo.log(currentUser.id, "BLOCK_FROM_SOC", targetUser.email, {
+          eventId: ev.id,
+          reason,
+        });
+        await systemEventRepo.record({
+          type: "SUSPENSAO_CONTA_SOC",
+          severity: "alta",
+          userEmail: targetUser.email,
+          detail: `Conta bloqueada pelo Super Admin via SOC: ${reason}`,
+        });
+        showToast(`Conta de ${targetUser.name} bloqueada.`);
+      },
+    });
+  };
+
+  const requestSuspendStoreFromSoc = (targetStore: StoreType, ev: SystemEvent) => {
+    if (!currentUser) return;
+    openConfirm({
+      title: `Suspender loja "${targetStore.name}" via SOC?`,
+      description: `Suspende a loja (${targetStore.code || "LJ"}) associada ao alerta "${ev.type}" e fecha o incidente.`,
+      confirmLabel: "Suspender Loja",
+      tone: "danger",
+      requireReason: true,
+      reasonLabel: "Motivo de segurança *",
+      action: async (reason) => {
+        await storeRepo.suspendStore(targetStore.id, true, reason);
+        await systemEventRepo.resolve(ev.id, true);
+        await auditRepo.log(currentUser.id, "BLOCK_FROM_SOC", `${targetStore.name} (${targetStore.code || targetStore.id})`, {
+          eventId: ev.id,
+          reason,
+        });
+        showToast(`Loja ${targetStore.name} suspensa via SOC.`);
+      },
+    });
+  };
+
+  const requestClearAppErrors = () => {
+    if (!currentUser) return;
+    openConfirm({
+      title: "Limpar todos os registos de erros da Observabilidade?",
+      description: "Os contadores agrupados por ecrã em erros_app serão removidos após análise.",
+      confirmLabel: "Limpar Registos",
+      tone: "warning",
+      action: async () => {
+        await appErrorRepo.clearAll();
+        await auditRepo.log(currentUser.id, "CLEAR_APP_ERRORS", "erros_app");
+        showToast("Registos de erros limpos.");
+      },
+    });
+  };
+
+  // Contadores da barra lateral
+  const counters = useMemo(() => {
+    const pendingStores = stores.filter((s) => !s.isApproved && s.approvalStatus !== "rejeitado").length;
+    const pendingAccounts = users.filter(
+      (u) => u.isApproved === false && u.role !== "cliente" && u.approvalStatus !== "rejeitado"
+    ).length;
+    const pendingPayments =
+      payments.filter((p) => p.status === "pendente").length +
+      courierFees.filter((f) => f.status === "pendente").length;
+    const pendingReports = reports.filter((r) => r.status === "pendente").length;
+    const delayedDeliveries = deliveries.filter(
+      (d) => d.status !== "Entregue" && (d.hasDelay || d.status === "Com problema")
+    ).length;
+    const openSecurityAlerts = systemEvents.filter((e) => !e.resolved).length;
+
+    return {
+      approvals: pendingStores + pendingAccounts,
+      stores: stores.length,
+      users: users.length,
+      orders: orders.length,
+      payments: pendingPayments,
+      ads: ads.length,
+      deliveries: delayedDeliveries > 0 ? delayedDeliveries : deliveries.length,
+      deliveriesAlert: delayedDeliveries > 0,
+      reports: pendingReports,
+      securityAlerts: openSecurityAlerts,
+    };
+  }, [stores, users, payments, courierFees, reports, deliveries, orders, ads, systemEvents]);
+
+  // Ecrã de Login
+  if (!currentUser || !isAnyAdminRole(currentUser.role)) {
     return (
       <div className="min-h-screen bg-[#07111F] text-slate-100 flex items-center justify-center p-4">
         <div className="w-full max-w-md p-6 sm:p-8 rounded-3xl bg-[#172338] border border-[#26354B] shadow-2xl">
@@ -487,7 +1071,7 @@ export const AdminApp: React.FC = () => {
 
           <div className="p-3.5 rounded-2xl bg-[#111D30] border border-[#26354B] mb-6 text-xs text-[#A6B2C5] flex items-center gap-2">
             <Lock size={15} className="text-[#246BFD] shrink-0" />
-            <span>Acesso exclusivo para administradores autorizados do Mercado Uíge.</span>
+            <span>Acesso restrito a Super Admin, Moderadores e equipa Financeira.</span>
           </div>
 
           {loginError && (
@@ -500,7 +1084,7 @@ export const AdminApp: React.FC = () => {
           {!otpSent ? (
             <form onSubmit={handleSendOtp} className="space-y-4">
               <div>
-                <label className="block text-xs font-bold text-[#A6B2C5] mb-1.5">E-mail do Administrador</label>
+                <label className="block text-xs font-bold text-[#A6B2C5] mb-1.5">E-mail da Equipa</label>
                 <div className="flex items-center gap-2.5 px-3.5 py-3 rounded-2xl bg-[#111D30] border border-[#26354B] focus-within:border-[#246BFD]">
                   <Mail size={16} className="text-[#A6B2C5] shrink-0" />
                   <input
@@ -519,7 +1103,7 @@ export const AdminApp: React.FC = () => {
                 disabled={loginLoading}
                 className="w-full py-3.5 rounded-2xl font-black text-sm bg-[#246BFD] text-white shadow-lg cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
               >
-                {loginLoading ? "A enviar código..." : "Enviar Código de 6 Dígitos"}
+                {loginLoading ? "A enviar código..." : "Enviar Código de Acesso"}
                 <ArrowRight size={16} />
               </button>
             </form>
@@ -527,7 +1111,7 @@ export const AdminApp: React.FC = () => {
             <form onSubmit={handleVerifyOtp} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-[#A6B2C5] mb-1.5">
-                  Código de 6 Dígitos enviado para {loginEmail}
+                  Código enviado para {loginEmail}
                 </label>
                 <div className="flex items-center gap-2.5 px-3.5 py-3 rounded-2xl bg-[#111D30] border border-[#26354B] focus-within:border-[#B7F34A]">
                   <Lock size={16} className="text-[#B7F34A]" />
@@ -570,1298 +1154,352 @@ export const AdminApp: React.FC = () => {
     );
   }
 
-  const pendingStoresCount = stores.filter((s) => !s.isApproved).length;
-  const pendingUsersCount = users.filter((u) => u.isApproved === false && u.role !== "cliente").length;
-  const pendingPaymentsCount = payments.filter((p) => p.status === "pendente").length;
-  const pendingReportsCount = reports.filter((r) => r.status === "pendente").length;
-  const delayedDeliveriesCount = deliveries.filter((d) => d.hasDelay || d.status === "Com problema").length;
+  const navItems: Array<{
+    id: AdminSection;
+    label: string;
+    icon: React.ComponentType<{ size?: number; className?: string }>;
+    badge?: number;
+    badgeTone?: "amber" | "blue" | "lime";
+  }> = [
+    { id: "resumo", label: "Resumo", icon: LayoutDashboard },
+    {
+      id: "aprovacoes",
+      label: "Aprovações",
+      icon: ClipboardCheck,
+      badge: counters.approvals,
+      badgeTone: counters.approvals > 0 ? "amber" : "blue",
+    },
+    { id: "lojas", label: "Lojas", icon: Store, badge: counters.stores, badgeTone: "blue" },
+    { id: "utilizadores", label: "Utilizadores", icon: Users, badge: counters.users, badgeTone: "blue" },
+    { id: "encomendas", label: "Encomendas", icon: Package, badge: counters.orders, badgeTone: "blue" },
+    {
+      id: "pagamentos",
+      label: "Pagamentos",
+      icon: CreditCard,
+      badge: counters.payments,
+      badgeTone: counters.payments > 0 ? "amber" : "blue",
+    },
+    { id: "anuncios", label: "Anúncios", icon: Megaphone, badge: counters.ads, badgeTone: "blue" },
+    {
+      id: "entregas",
+      label: "Entregas",
+      icon: Truck,
+      badge: counters.deliveries,
+      badgeTone: counters.deliveriesAlert ? "amber" : "blue",
+    },
+    {
+      id: "denuncias",
+      label: "Denúncias",
+      icon: AlertCircle,
+      badge: counters.reports,
+      badgeTone: counters.reports > 0 ? "amber" : "blue",
+    },
+    { id: "configuracoes", label: "Configurações", icon: Settings },
+    { id: "auditoria", label: "Auditoria", icon: FileText },
+    {
+      id: "controlo",
+      label: "Centro de Controlo",
+      icon: Activity,
+      badge: counters.securityAlerts > 0 ? counters.securityAlerts : undefined,
+      badgeTone: counters.securityAlerts > 0 ? "amber" : "lime",
+    },
+  ];
 
-  const filteredStores = stores.filter((s) => {
-    if (storeFilter === "pendentes") return !s.isApproved;
-    if (storeFilter === "loja_fixa") return s.storeType === "loja_fixa";
-    if (storeFilter === "vendedor_ambulante") return s.storeType === "vendedor_ambulante";
-    if (storeFilter === "suspensas") return Boolean(s.isSuspended);
-    return true;
-  });
+  const visibleNavItems = navItems.filter((item) => canAccessAdminSection(currentUser.role, item.id));
 
-  const couriers = users.filter((u) => u.role === "entregador");
+  const renderSidebarContent = () => (
+    <div className="flex flex-col h-full">
+      <div className="p-4 border-b border-[#26354B] flex items-center gap-2.5">
+        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-[#246BFD] to-[#07111F] flex items-center justify-center text-[#B7F34A] shrink-0">
+          <ShieldCheck size={20} />
+        </div>
+        <div className="min-w-0">
+          <span className="font-black text-sm text-white block truncate">
+            Mercado <span className="text-[#B7F34A]">Uíge</span>
+          </span>
+          <span className="text-[11px] font-bold text-[#246BFD] block truncate">
+            {formatUserRole(currentUser.role)}
+          </span>
+        </div>
+      </div>
+
+      <nav className="flex-1 overflow-y-auto p-3 space-y-1 text-xs" aria-label="Navegação administrativa">
+        {visibleNavItems.map((item) => {
+          const Icon = item.icon;
+          const isActive = activeTab === item.id;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => {
+                setActiveTab(item.id);
+                setMobileMenuOpen(false);
+              }}
+              className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl font-bold transition-colors cursor-pointer ${
+                isActive
+                  ? "bg-[#246BFD] text-white shadow-lg shadow-[#246BFD]/20"
+                  : "text-[#A6B2C5] hover:bg-[#111D30] hover:text-white"
+              }`}
+            >
+              <span className="flex items-center gap-2.5 min-w-0">
+                <Icon size={16} className={isActive ? "text-[#B7F34A] shrink-0" : "shrink-0"} />
+                <span className="truncate">{item.label}</span>
+              </span>
+              {typeof item.badge === "number" && (
+                <span
+                  className={`px-2 py-0.5 rounded-md text-[10px] font-black tabular-nums shrink-0 ${
+                    isActive
+                      ? "bg-[#07111F]/40 text-[#B7F34A]"
+                      : item.badgeTone === "amber" && item.badge > 0
+                      ? "bg-amber-400/20 text-amber-300"
+                      : "bg-[#111D30] text-[#A6B2C5]"
+                  }`}
+                >
+                  {item.badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </nav>
+
+      <div className="p-3 border-t border-[#26354B] space-y-2 text-xs">
+        <div className="px-3 py-2 rounded-xl bg-[#111D30] border border-[#26354B]">
+          <span className="text-[10px] text-[#A6B2C5] block">Sessão activa</span>
+          <span className="font-bold text-white block truncate">{currentUser.email}</span>
+        </div>
+        <button
+          type="button"
+          onClick={handleLogout}
+          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 font-bold hover:bg-red-500/20 cursor-pointer"
+        >
+          <LogOut size={14} /> Terminar Sessão
+        </button>
+      </div>
+    </div>
+  );
 
   return (
-    <div className="min-h-screen bg-[#07111F] text-slate-100 flex flex-col">
-      {/* Top Admin Bar */}
-      <header className="sticky top-0 z-40 bg-[#172338]/95 backdrop-blur-md border-b border-[#26354B] px-3 sm:px-4 py-3 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-[#246BFD] to-[#07111F] flex items-center justify-center text-[#B7F34A] font-black shrink-0">
-            <ShieldCheck size={20} />
-          </div>
-          <div className="min-w-0">
-            <span className="font-black text-sm tracking-tight text-white block truncate">
-              Mercado <span className="text-[#B7F34A]">Uíge</span> • Administração
-            </span>
-            <span className="text-[10px] text-[#A6B2C5] block truncate">
-              Sessão: <strong className="text-white">{currentUser.email}</strong>
-            </span>
-          </div>
-        </div>
+    <div className="min-h-screen bg-[#07111F] text-slate-100 flex">
+      {/* Menu Lateral Desktop */}
+      <aside className="hidden lg:flex w-64 shrink-0 bg-[#172338] border-r border-[#26354B] flex-col sticky top-0 h-screen">
+        {renderSidebarContent()}
+      </aside>
 
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={loadData}
-            className="p-2 rounded-xl bg-[#111D30] border border-[#26354B] text-[#A6B2C5] hover:text-white cursor-pointer"
-            title="Recarregar dados"
-            aria-label="Recarregar dados"
-          >
-            <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
-          </button>
-
-          <button
-            type="button"
-            onClick={handleLogout}
-            className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs font-bold hover:bg-red-500/20 cursor-pointer"
-          >
-            <LogOut size={13} />
-            <span>Sair</span>
-          </button>
-        </div>
-      </header>
-
-      {/* Main Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 space-y-5 sm:space-y-6">
-        {/* 8 Secções Organizadas */}
-        <nav className="flex gap-2 overflow-x-auto no-scrollbar pb-1 text-xs font-black">
-          {[
-            { id: "resumo", label: "Resumo", icon: LayoutDashboard },
-            {
-              id: "lojas",
-              label: pendingStoresCount > 0 ? `Lojas e aprovações (${pendingStoresCount})` : "Lojas e aprovações",
-              icon: Store,
-            },
-            {
-              id: "utilizadores",
-              label: pendingUsersCount > 0 ? `Utilizadores (${pendingUsersCount})` : "Utilizadores",
-              icon: Users,
-            },
-            { id: "anuncios", label: `Anúncios (${ads.length})`, icon: Megaphone },
-            {
-              id: "pagamentos",
-              label: pendingPaymentsCount > 0 ? `Pagamentos e planos (${pendingPaymentsCount})` : "Pagamentos e planos",
-              icon: CreditCard,
-            },
-            {
-              id: "denuncias",
-              label: pendingReportsCount > 0 ? `Denúncias (${pendingReportsCount})` : "Denúncias",
-              icon: AlertCircle,
-            },
-            {
-              id: "entregadores",
-              label: delayedDeliveriesCount > 0 ? `Entregadores (${delayedDeliveriesCount} alertas)` : "Entregadores",
-              icon: Truck,
-            },
-            { id: "auditoria", label: "Auditoria", icon: FileText },
-          ].map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setActiveTab(tab.id as AdminSection)}
-                className={`flex items-center gap-1.5 px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-2xl whitespace-nowrap cursor-pointer transition-all shrink-0 ${
-                  isActive
-                    ? "bg-[#246BFD] text-white shadow-lg shadow-[#246BFD]/20 font-black"
-                    : "bg-[#172338] text-[#A6B2C5] border border-[#26354B] hover:border-[#246BFD]"
-                }`}
-              >
-                <Icon size={14} className={isActive ? "text-[#B7F34A]" : ""} />
-                <span>{tab.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-
-        {/* 1. RESUMO */}
-        {activeTab === "resumo" && (
-          <div className="space-y-6 anim-fadeUp">
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-              <div className="p-4 rounded-3xl bg-[#172338] border border-[#26354B]">
-                <span className="text-[11px] text-[#A6B2C5] font-bold block mb-1">Utilizadores</span>
-                <span className="text-2xl font-black text-white tabular-nums">{users.length}</span>
-              </div>
-              <div className="p-4 rounded-3xl bg-[#172338] border border-[#26354B]">
-                <span className="text-[11px] text-[#A6B2C5] font-bold block mb-1">Lojas</span>
-                <span className="text-2xl font-black text-[#B7F34A] tabular-nums">{stores.length}</span>
-              </div>
-              <div className="p-4 rounded-3xl bg-[#172338] border border-[#26354B]">
-                <span className="text-[11px] text-[#A6B2C5] font-bold block mb-1">Artigos</span>
-                <span className="text-2xl font-black text-white tabular-nums">{products.length}</span>
-              </div>
-              <div className="p-4 rounded-3xl bg-[#172338] border border-[#26354B]">
-                <span className="text-[11px] text-[#A6B2C5] font-bold block mb-1">Entregas</span>
-                <span className="text-2xl font-black text-[#246BFD] tabular-nums">{deliveries.length}</span>
-              </div>
-              <div className="p-4 rounded-3xl bg-[#172338] border border-[#26354B]">
-                <span className="text-[11px] text-[#A6B2C5] font-bold block mb-1">Pendentes</span>
-                <span className="text-2xl font-black text-amber-400 tabular-nums">
-                  {pendingStoresCount + pendingUsersCount + pendingPaymentsCount + pendingReportsCount}
-                </span>
-              </div>
-              <div className="p-4 rounded-3xl bg-[#172338] border border-[#26354B]">
-                <span className="text-[11px] text-[#A6B2C5] font-bold block mb-1">Volume de Vendas</span>
-                <span className="text-lg font-black text-[#B7F34A] tabular-nums break-words">{fmtKz(totalRevenue)}</span>
-              </div>
-            </div>
-
-            {/* Avisos Provinciais */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              <form
-                onSubmit={handleSendBroadcast}
-                className="p-5 rounded-3xl bg-[#172338] border border-[#26354B] space-y-3 text-xs"
-              >
-                <h2 className="font-black text-sm flex items-center gap-2">
-                  <Megaphone size={16} className="text-[#B7F34A]" /> Difusão de Aviso Provincial
-                </h2>
-                <input
-                  type="text"
-                  required
-                  value={broadcastTitle}
-                  onChange={(e) => setBroadcastTitle(e.target.value)}
-                  placeholder="Título do comunicado oficial..."
-                  className="w-full p-3 rounded-2xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
-                />
-                <textarea
-                  required
-                  rows={3}
-                  value={broadcastBody}
-                  onChange={(e) => setBroadcastBody(e.target.value)}
-                  placeholder="Mensagem entregue a todos os utilizadores no Uíge..."
-                  className="w-full p-3 rounded-2xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
-                />
-                <button
-                  type="submit"
-                  className="w-full py-3 rounded-2xl font-black bg-[#246BFD] text-white cursor-pointer"
-                >
-                  Enviar Notificação Provincial
-                </button>
-              </form>
-
-              {/* Remoção rápida de artigos do catálogo */}
-              <div className="p-5 rounded-3xl bg-[#172338] border border-[#26354B] space-y-3 text-xs">
-                <h2 className="font-black text-sm flex items-center gap-2">
-                  <Package size={16} className="text-[#246BFD]" /> Catálogo Recente ({products.length})
-                </h2>
-                {pendingDeleteProduct && (
-                  <div className="p-3 rounded-2xl bg-red-500/15 border border-red-500/40 flex flex-wrap items-center justify-between gap-2">
-                    <span>
-                      Remover <b>{pendingDeleteProduct.name}</b>?
-                    </span>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setPendingDeleteProduct(null)}
-                        className="px-2.5 py-1 rounded-xl border border-[#26354B] cursor-pointer"
-                      >
-                        Cancelar
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleConfirmRemoveProduct}
-                        className="px-2.5 py-1 rounded-xl bg-red-600 text-white font-bold cursor-pointer"
-                      >
-                        Remover
-                      </button>
-                    </div>
-                  </div>
-                )}
-                {products.length === 0 ? (
-                  <p className="text-[#A6B2C5]">Ainda sem artigos publicados no catálogo.</p>
-                ) : (
-                  <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-                    {products.slice(0, 12).map((p) => (
-                      <div
-                        key={p.id}
-                        className="p-2.5 rounded-2xl bg-[#111D30] border border-[#26354B] flex items-center justify-between gap-2"
-                      >
-                        <div className="min-w-0">
-                          <span className="font-bold text-white block truncate">
-                            {p.name} {p.condition === "usado" ? "(Usado)" : ""}
-                          </span>
-                          <span className="text-[#B7F34A] font-black tabular-nums">{fmtKz(p.price)}</span>
-                          <span className="text-[#A6B2C5] ml-2">{p.storeName || p.municipality}</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setPendingDeleteProduct(p)}
-                          className="p-2 text-red-400 hover:text-red-500 cursor-pointer shrink-0"
-                          aria-label="Remover artigo"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Monitorização Global de Todas as Encomendas */}
-            <div className="p-5 rounded-3xl bg-[#172338] border border-[#26354B] space-y-3 text-xs">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="font-black text-sm flex items-center gap-2">
-                  <Package size={16} className="text-[#B7F34A]" /> Estado de Todas as Encomendas ({orders.length})
-                </h2>
-                <select
-                  value={orderStatusFilter}
-                  onChange={(e) => setOrderStatusFilter(e.target.value)}
-                  className="p-2 rounded-xl bg-[#111D30] border border-[#26354B] text-white font-bold outline-none"
-                >
-                  <option value="todas">Todos os estados</option>
-                  <option value="Pendente">Pendente</option>
-                  <option value="Confirmada">Confirmada</option>
-                  <option value="Em preparação">Em preparação</option>
-                  <option value="Pronta para levantamento">Pronta para levantamento</option>
-                  <option value="Em entrega">Em entrega</option>
-                  <option value="Entregue">Entregue</option>
-                  <option value="Cancelada">Cancelada</option>
-                </select>
-              </div>
-
-              {(() => {
-                const visibleOrders =
-                  orderStatusFilter === "todas"
-                    ? orders
-                    : orders.filter((o) => o.status === orderStatusFilter);
-                if (visibleOrders.length === 0) {
-                  return <p className="text-[#A6B2C5]">Nenhuma encomenda registada neste estado.</p>;
-                }
-                return (
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs">
-                      <thead className="bg-[#111D30] text-[#A6B2C5] uppercase font-bold">
-                        <tr>
-                          <th className="p-3">Código</th>
-                          <th className="p-3">Loja</th>
-                          <th className="p-3">Cliente</th>
-                          <th className="p-3">Total</th>
-                          <th className="p-3">Pagamento</th>
-                          <th className="p-3">Estado</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#26354B]">
-                        {visibleOrders.map((ord) => (
-                          <tr key={ord.id} className="hover:bg-[#111D30]/40">
-                            <td className="p-3 font-black text-[#B7F34A] whitespace-nowrap">#{ord.code}</td>
-                            <td className="p-3 text-white whitespace-nowrap">{ord.storeName || "Loja Uíge"}</td>
-                            <td className="p-3 text-[#A6B2C5] whitespace-nowrap">
-                              {ord.userName || "Cliente"}{ord.userPhone ? ` (${ord.userPhone})` : ""}
-                            </td>
-                            <td className="p-3 font-bold text-white tabular-nums whitespace-nowrap">{fmtKz(ord.total)}</td>
-                            <td className="p-3 whitespace-nowrap">
-                              <span
-                                className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
-                                  ord.paymentStatus === "pago"
-                                    ? "bg-emerald-500/20 text-emerald-400"
-                                    : "bg-amber-500/20 text-amber-300"
-                                }`}
-                              >
-                                {ord.paymentStatus === "pago" ? "Pago" : "Por pagar"}
-                              </span>
-                            </td>
-                            <td className="p-3 whitespace-nowrap">
-                              <span className="px-2.5 py-0.5 rounded-full bg-[#246BFD] text-white text-[10px] font-bold">
-                                {ord.status}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                );
-              })()}
-            </div>
-          </div>
-        )}
-
-        {/* 2. LOJAS E APROVAÇÕES */}
-        {activeTab === "lojas" && (
-          <div className="space-y-4 anim-fadeUp">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="font-black text-base sm:text-lg">Moderação de Lojas, Ambulantes e Selos VIP</h2>
-              <div className="flex flex-wrap gap-1.5 text-xs font-bold">
-                {[
-                  { id: "todas", label: `Todas (${stores.length})` },
-                  { id: "pendentes", label: `Pendentes (${pendingStoresCount})` },
-                  { id: "loja_fixa", label: "Loja fixa" },
-                  { id: "vendedor_ambulante", label: "Ambulantes" },
-                  { id: "suspensas", label: "Suspensas" },
-                ].map((f) => (
-                  <button
-                    key={f.id}
-                    type="button"
-                    onClick={() => setStoreFilter(f.id as any)}
-                    className={`px-3 py-1.5 rounded-full border cursor-pointer ${
-                      storeFilter === f.id
-                        ? "bg-[#246BFD] text-white border-[#246BFD]"
-                        : "bg-[#172338] border-[#26354B] text-[#A6B2C5]"
-                    }`}
-                  >
-                    {f.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {filteredStores.length === 0 ? (
-              <div className="p-8 text-center rounded-3xl bg-[#172338] border border-[#26354B] text-xs text-[#A6B2C5]">
-                Nenhuma loja encontrada neste filtro.
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {filteredStores.map((s) => (
-                  <div
-                    key={s.id}
-                    className="p-4 rounded-3xl bg-[#172338] border border-[#26354B] flex flex-col justify-between gap-3 text-xs shadow-lg"
-                  >
-                    <div className="space-y-2.5">
-                      <div className="flex items-start gap-3">
-                        <div className="w-14 h-14 rounded-2xl overflow-hidden shrink-0 bg-[#111D30]">
-                          <SafeImage
-                            src={s.facadeImage || s.logo}
-                            alt={s.name}
-                            className="w-full h-full object-cover"
-                            fallbackIcon={<Store size={22} className="text-[#246BFD]" />}
-                          />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <h3 className="font-black text-sm text-white truncate">{s.name}</h3>
-                            {s.isVip && <Crown size={14} className="text-amber-400 fill-amber-400 shrink-0" />}
-                          </div>
-                          <span className="text-[11px] font-bold text-[#246BFD] block">
-                            {s.code || "LJ-0000"} · {formatStoreType(s.storeType)} · Plano {formatPlanType(s.planType)}
-                          </span>
-                          <span className="text-[11px] text-[#A6B2C5] block truncate">
-                            {s.bairro ? `${s.bairro}, ` : ""}
-                            {s.municipality}, Uíge
-                          </span>
-                        </div>
-                      </div>
-
-                      {s.address && <p className="text-[11px] text-[#A6B2C5]">Morada: {s.address}</p>}
-                      {s.phone && <p className="text-[11px] text-[#A6B2C5]">Telefone: {s.phone}</p>}
-
-                      <div className="flex flex-wrap gap-1.5 text-[10px] font-bold">
-                        <span
-                          className={`px-2 py-0.5 rounded-full ${
-                            s.isApproved ? "bg-emerald-500/20 text-emerald-400" : "bg-amber-500/20 text-amber-400"
-                          }`}
-                        >
-                          {s.isApproved ? "Aprovada" : "Pendente de Aprovação"}
-                        </span>
-                        {s.isSuspended && (
-                          <span className="px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">Suspensa</span>
-                        )}
-                        {(s.reportsCount || 0) > 0 && (
-                          <span className="px-2 py-0.5 rounded-full bg-red-500/15 text-red-300">
-                            {s.reportsCount} denúncia(s)
-                          </span>
-                        )}
-                      </div>
-
-                      {(s.facadeImage || s.biPhotoUrl) && (
-                        <div className="flex gap-2">
-                          {s.facadeImage && (
-                            <button
-                              type="button"
-                              onClick={() => setPreviewImageUrl(s.facadeImage!)}
-                              className="px-2.5 py-1 rounded-xl bg-[#111D30] border border-[#26354B] text-[#246BFD] font-bold cursor-pointer"
-                            >
-                              Ver Fachada
-                            </button>
-                          )}
-                          {s.biPhotoUrl && (
-                            <button
-                              type="button"
-                              onClick={() => setPreviewImageUrl(s.biPhotoUrl!)}
-                              className="px-2.5 py-1 rounded-xl bg-[#111D30] border border-[#26354B] text-[#B7F34A] font-bold cursor-pointer"
-                            >
-                              Ver Foto do BI
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="pt-3 border-t border-[#26354B] flex flex-wrap gap-1.5">
-                      {!s.isApproved && (
-                        <button
-                          type="button"
-                          onClick={() => handleApproveStore(s, true)}
-                          className="flex-1 py-1.5 px-2.5 rounded-xl bg-emerald-500 text-slate-950 font-black cursor-pointer"
-                        >
-                          Aprovar
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => handleSuspendStore(s)}
-                        className={`flex-1 py-1.5 px-2.5 rounded-xl font-bold cursor-pointer ${
-                          s.isSuspended
-                            ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                            : "bg-red-500/20 text-red-400 border border-red-500/30"
-                        }`}
-                      >
-                        {s.isSuspended ? "Reactivar" : "Suspender"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleToggleStoreVip(s)}
-                        className={`py-1.5 px-2.5 rounded-xl font-black cursor-pointer border ${
-                          s.isVip
-                            ? "bg-amber-400 text-slate-950 border-amber-400"
-                            : "border-[#26354B] text-white"
-                        }`}
-                      >
-                        {s.isVip ? "Tirar VIP" : "VIP"}
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* 3. UTILIZADORES */}
-        {activeTab === "utilizadores" && (() => {
-          const filteredUsers = users.filter(
-            (u) =>
-              (u.name || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
-              (u.email || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
-              (u.code || "").toLowerCase().includes(searchTerm.toLowerCase())
-          );
-          return (
-            <div className="space-y-4 anim-fadeUp">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <h2 className="font-black text-base sm:text-lg">Gestão de Utilizadores e Aprovações</h2>
-                <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[#111D30] border border-[#26354B] text-xs w-full sm:w-72">
-                  <Search size={14} className="text-[#A6B2C5] shrink-0" />
-                  <input
-                    type="text"
-                    placeholder="Filtrar por código (CL-0001), nome ou e-mail..."
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    className="bg-transparent outline-none text-white font-medium w-full min-w-0"
-                  />
-                </div>
-              </div>
-
-              {filteredUsers.length === 0 ? (
-                <div className="p-8 text-center rounded-3xl bg-[#172338] border border-[#26354B] text-xs text-[#A6B2C5]">
-                  Nenhum utilizador encontrado.
-                </div>
-              ) : (
-                <div className="rounded-3xl border border-[#26354B] bg-[#172338] overflow-hidden shadow-lg">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs">
-                      <thead className="bg-[#111D30] text-[#A6B2C5] uppercase tracking-wider font-bold">
-                        <tr>
-                          <th className="p-3.5">Código</th>
-                          <th className="p-3.5">Nome / E-mail</th>
-                          <th className="p-3.5">Papel</th>
-                          <th className="p-3.5">Município / Bairro</th>
-                          <th className="p-3.5">Aprovação</th>
-                          <th className="p-3.5 text-right">Acções</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#26354B]">
-                        {filteredUsers.map((user) => (
-                          <tr key={user.id} className="hover:bg-[#111D30]/50">
-                            <td className="p-3.5 font-black text-[#B7F34A] whitespace-nowrap">
-                              {user.code || "—"}
-                            </td>
-                            <td className="p-3.5">
-                              <span className="font-bold text-white block">{user.name}</span>
-                              <span className="text-[#A6B2C5]">{user.email}</span>
-                            </td>
-                            <td className="p-3.5 whitespace-nowrap font-bold">{formatUserRole(user.role)}</td>
-                            <td className="p-3.5 text-[#A6B2C5] whitespace-nowrap">
-                              {user.bairro ? `${user.bairro}, ` : ""}
-                              {user.municipality || "Uíge"}
-                            </td>
-                            <td className="p-3.5 whitespace-nowrap">
-                              {user.isSuspended ? (
-                                <span className="text-red-400 font-bold">Suspenso</span>
-                              ) : user.isApproved === false ? (
-                                <span className="text-amber-400 font-bold">Pendente</span>
-                              ) : (
-                                <span className="text-emerald-400 font-bold">Activo</span>
-                              )}
-                            </td>
-                            <td className="p-3.5 text-right whitespace-nowrap space-x-1.5">
-                              {user.isApproved === false && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleApproveUser(user, true)}
-                                  className="px-3 py-1 rounded-full bg-emerald-500 text-slate-950 font-black cursor-pointer"
-                                >
-                                  Aprovar
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => handleToggleSuspendUser(user)}
-                                className={`px-3 py-1 rounded-full text-xs font-bold cursor-pointer ${
-                                  user.isSuspended
-                                    ? "bg-emerald-500 text-slate-950"
-                                    : "bg-red-500/20 text-red-400 border border-red-500/30"
-                                }`}
-                              >
-                                {user.isSuspended ? "Reactivar" : "Suspender"}
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })()}
-
-        {/* 4. ANÚNCIOS PATROCINADOS */}
-        {activeTab === "anuncios" && (
-          <div className="space-y-5 anim-fadeUp">
-            <h2 className="font-black text-base sm:text-lg">Gestão de Anúncios Patrocinados</h2>
-
-            <form
-              onSubmit={handleCreateAdminAd}
-              className="p-4 sm:p-5 rounded-3xl bg-[#172338] border border-[#26354B] grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs"
-            >
-              <input
-                type="text"
-                required
-                value={newAdTitle}
-                onChange={(e) => setNewAdTitle(e.target.value)}
-                placeholder="Título do anúncio *"
-                className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-              />
-              <input
-                type="text"
-                value={newAdSubtitle}
-                onChange={(e) => setNewAdSubtitle(e.target.value)}
-                placeholder="Subtítulo promocional"
-                className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-              />
-              <select
-                value={newAdStoreId}
-                onChange={(e) => setNewAdStoreId(e.target.value)}
-                className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-              >
-                <option value="">Selecionar loja</option>
-                {stores.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name} ({s.code || "LJ"})
-                  </option>
-                ))}
-              </select>
-              <select
-                value={newAdPosition}
-                onChange={(e) => setNewAdPosition(e.target.value as AdPosition)}
-                className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-              >
-                <option value="topo">Posição: Topo</option>
-                <option value="categoria">Posição: Categoria</option>
-                <option value="pesquisa">Posição: Pesquisa</option>
-              </select>
-              <div className="flex gap-2">
-                <input
-                  type="number"
-                  min="1"
-                  max="180"
-                  value={newAdDays}
-                  onChange={(e) => setNewAdDays(e.target.value)}
-                  className="w-20 p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-                  title="Dias de duração"
-                />
-                <button
-                  type="submit"
-                  className="flex-1 px-3 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black flex items-center justify-center gap-1 cursor-pointer"
-                >
-                  <Plus size={14} /> Publicar
-                </button>
-              </div>
-            </form>
-
-            {ads.length === 0 ? (
-              <div className="p-8 text-center rounded-3xl bg-[#172338] border border-[#26354B] text-xs text-[#A6B2C5]">
-                Nenhum anúncio patrocinado registado até ao momento.
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {ads.map((ad) => (
-                  <div
-                    key={ad.id}
-                    className="p-4 rounded-3xl bg-[#172338] border border-[#26354B] space-y-2.5 text-xs"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-[#246BFD]/20 text-[#246BFD] uppercase">
-                          {ad.position}
-                        </span>
-                        <h3 className="font-black text-sm text-white mt-1 truncate">{ad.title}</h3>
-                        <p className="text-[#A6B2C5] truncate">{ad.storeName || "Campanha Provincial"}</p>
-                      </div>
-                      <span
-                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold capitalize shrink-0 ${
-                          ad.active && ad.status === "aprovado"
-                            ? "bg-emerald-500/20 text-emerald-400"
-                            : "bg-amber-500/20 text-amber-400"
-                        }`}
-                      >
-                        {ad.active && ad.status === "aprovado" ? "Activo" : ad.status}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-4 text-[#A6B2C5]">
-                      <span className="flex items-center gap-1 tabular-nums">
-                        <Eye size={13} /> {ad.views}
-                      </span>
-                      <span className="flex items-center gap-1 tabular-nums">
-                        <MousePointerClick size={13} /> {ad.clicks}
-                      </span>
-                      <span>Até {fmtDate(ad.endDate)}</span>
-                    </div>
-
-                    <div className="pt-2 border-t border-[#26354B] flex gap-2">
-                      {!ad.active ? (
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            await adRepo.updateStatus(ad.id, "aprovado", true);
-                            await auditRepo.log(currentUser.id, "REVIEW_AD", ad.id, { active: true });
-                            showToast("Anúncio activado.");
-                            loadData();
-                          }}
-                          className="flex-1 py-1.5 rounded-xl bg-emerald-500 text-slate-950 font-black cursor-pointer"
-                        >
-                          Activar
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            await adRepo.updateStatus(ad.id, "aprovado", false);
-                            await auditRepo.log(currentUser.id, "REVIEW_AD", ad.id, { active: false });
-                            showToast("Anúncio pausado.");
-                            loadData();
-                          }}
-                          className="flex-1 py-1.5 rounded-xl bg-amber-500/20 text-amber-300 font-bold cursor-pointer"
-                        >
-                          Pausar
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          await adRepo.delete(ad.id);
-                          showToast("Anúncio removido.");
-                          loadData();
-                        }}
-                        className="px-3 py-1.5 rounded-xl bg-red-500/15 text-red-400 font-bold cursor-pointer"
-                      >
-                        Eliminar
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* 5. PAGAMENTOS E PLANOS */}
-        {activeTab === "pagamentos" && (
-          <div className="space-y-5 anim-fadeUp">
-            <h2 className="font-black text-base sm:text-lg">Preços por Tipo, WhatsApp do Admin e Pagamentos</h2>
-
-            <div className="p-4 sm:p-5 rounded-3xl bg-[#172338] border border-[#26354B] space-y-4 text-xs">
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                <div className="sm:col-span-2 lg:col-span-3">
-                  <label className="block font-bold text-[#A6B2C5] mb-1">
-                    Número de WhatsApp de Fallback / Apoio do Admin (Angola)
-                  </label>
-                  <input
-                    type="tel"
-                    value={configDraft.adminWhatsapp}
-                    onChange={(e) => setConfigDraft({ ...configDraft, adminWhatsapp: e.target.value })}
-                    placeholder="945379003"
-                    className="w-full sm:w-80 p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white font-bold outline-none"
-                  />
-                  <span className="text-[11px] text-[#A6B2C5] block mt-1">
-                    Usado automaticamente quando a loja não tem um WhatsApp válido registado.
-                  </span>
-                </div>
-
-                <div className="p-3 rounded-2xl bg-[#111D30] border border-[#26354B] space-y-2">
-                  <span className="font-black text-[#B7F34A] block">Planos: Loja Fixa (Kz / mês)</span>
-                  <div>
-                    <label className="block text-[11px] text-[#A6B2C5] mb-0.5">Básico</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={configDraft.fixedStoreBasicPrice}
-                      onChange={(e) =>
-                        setConfigDraft({
-                          ...configDraft,
-                          fixedStoreBasicPrice: Number(e.target.value),
-                          basicPlanPrice: Number(e.target.value),
-                        })
-                      }
-                      className="w-full p-2 rounded-xl bg-[#172338] border border-[#26354B] text-white font-bold outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-[#A6B2C5] mb-0.5">Destaque / VIP</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={configDraft.fixedStoreVipPrice}
-                      onChange={(e) =>
-                        setConfigDraft({
-                          ...configDraft,
-                          fixedStoreVipPrice: Number(e.target.value),
-                          vipPlanPrice: Number(e.target.value),
-                        })
-                      }
-                      className="w-full p-2 rounded-xl bg-[#172338] border border-[#26354B] text-white font-bold outline-none"
-                    />
-                  </div>
-                </div>
-
-                <div className="p-3 rounded-2xl bg-[#111D30] border border-[#26354B] space-y-2">
-                  <span className="font-black text-[#246BFD] block">Planos: Vendedor Ambulante (Kz / mês)</span>
-                  <div>
-                    <label className="block text-[11px] text-[#A6B2C5] mb-0.5">Básico</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={configDraft.ambulantBasicPrice}
-                      onChange={(e) =>
-                        setConfigDraft({ ...configDraft, ambulantBasicPrice: Number(e.target.value) })
-                      }
-                      className="w-full p-2 rounded-xl bg-[#172338] border border-[#26354B] text-white font-bold outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-[#A6B2C5] mb-0.5">Destaque / VIP</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={configDraft.ambulantVipPrice}
-                      onChange={(e) =>
-                        setConfigDraft({ ...configDraft, ambulantVipPrice: Number(e.target.value) })
-                      }
-                      className="w-full p-2 rounded-xl bg-[#172338] border border-[#26354B] text-white font-bold outline-none"
-                    />
-                  </div>
-                </div>
-
-                <div className="p-3 rounded-2xl bg-[#111D30] border border-[#26354B] space-y-2">
-                  <span className="font-black text-emerald-400 block">Planos: Entregador (Kz / mês)</span>
-                  <div>
-                    <label className="block text-[11px] text-[#A6B2C5] mb-0.5">Básico</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={configDraft.courierBasicPrice}
-                      onChange={(e) =>
-                        setConfigDraft({ ...configDraft, courierBasicPrice: Number(e.target.value) })
-                      }
-                      className="w-full p-2 rounded-xl bg-[#172338] border border-[#26354B] text-white font-bold outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-[#A6B2C5] mb-0.5">Destaque / VIP</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={configDraft.courierVipPrice}
-                      onChange={(e) =>
-                        setConfigDraft({ ...configDraft, courierVipPrice: Number(e.target.value) })
-                      }
-                      className="w-full p-2 rounded-xl bg-[#172338] border border-[#26354B] text-white font-bold outline-none"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() =>
-                  handleSaveSystemConfig(
-                    {
-                      adminWhatsapp: configDraft.adminWhatsapp.trim() || "945379003",
-                      basicPlanPrice: configDraft.fixedStoreBasicPrice,
-                      vipPlanPrice: configDraft.fixedStoreVipPrice,
-                      fixedStoreBasicPrice: configDraft.fixedStoreBasicPrice,
-                      fixedStoreVipPrice: configDraft.fixedStoreVipPrice,
-                      ambulantBasicPrice: configDraft.ambulantBasicPrice,
-                      ambulantVipPrice: configDraft.ambulantVipPrice,
-                      courierBasicPrice: configDraft.courierBasicPrice,
-                      courierVipPrice: configDraft.courierVipPrice,
-                    },
-                    "Preços por tipo e WhatsApp do administrador guardados ✓"
-                  )
-                }
-                className="py-2.5 px-5 rounded-xl bg-[#B7F34A] text-slate-950 font-black cursor-pointer"
-              >
-                Guardar Definições de Planos e WhatsApp
-              </button>
-            </div>
-
-            {payments.length === 0 ? (
-              <div className="p-8 text-center rounded-3xl bg-[#172338] border border-[#26354B] text-xs text-[#A6B2C5]">
-                Ainda não existem comprovativos de pagamento enviados pelos comerciantes ou entregadores.
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {payments.map((pay) => (
-                  <div
-                    key={pay.id}
-                    className="p-4 rounded-3xl bg-[#172338] border border-[#26354B] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
-                  >
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-black text-sm text-white">
-                          {pay.storeName || pay.sellerName || "Utilizador"}
-                        </span>
-                        {pay.userRoleType && (
-                          <span className="px-2 py-0.5 rounded-full bg-white/10 text-white font-bold text-[10px]">
-                            {pay.userRoleType === "entregador"
-                              ? "Entregador"
-                              : formatStoreType(pay.userRoleType)}
-                          </span>
-                        )}
-                        <span className="px-2 py-0.5 rounded-full bg-[#246BFD]/20 text-[#246BFD] font-bold">
-                          {pay.type === "plano" ? `Plano ${formatPlanType(pay.targetPlan)}` : "Anúncio Patrocinado"}
-                        </span>
-                        <span className="font-black text-[#B7F34A] tabular-nums">{fmtKz(pay.amountKz)}</span>
-                      </div>
-                      <p className="text-[#A6B2C5]">
-                        {pay.method} {pay.reference ? `· Ref: ${pay.reference}` : ""} · {fmtDateTime(pay.createdAt)}
-                      </p>
-                      {pay.proofUrl && (
-                        <button
-                          type="button"
-                          onClick={() => setPreviewImageUrl(pay.proofUrl)}
-                          className="text-[#246BFD] font-bold hover:underline cursor-pointer"
-                        >
-                          Ver Comprovativo
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="flex items-center gap-2 shrink-0">
-                      {pay.status === "pendente" ? (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => handleReviewPayment(pay, "confirmado")}
-                            className="px-4 py-2 rounded-xl bg-emerald-500 text-slate-950 font-black cursor-pointer"
-                          >
-                            Confirmar e Activar
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleReviewPayment(pay, "rejeitado")}
-                            className="px-3 py-2 rounded-xl bg-red-500/20 text-red-400 font-bold cursor-pointer"
-                          >
-                            Rejeitar
-                          </button>
-                        </>
-                      ) : (
-                        <span
-                          className={`px-3 py-1 rounded-full font-black capitalize ${
-                            pay.status === "confirmado"
-                              ? "bg-emerald-500/20 text-emerald-400"
-                              : "bg-red-500/20 text-red-400"
-                          }`}
-                        >
-                          {pay.status}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* 6. DENÚNCIAS */}
-        {activeTab === "denuncias" && (
-          <div className="space-y-4 anim-fadeUp">
-            <h2 className="font-black text-base sm:text-lg">Denúncias e Suspensão Automática</h2>
-
-            <div className="p-4 rounded-3xl bg-[#172338] border border-[#26354B] flex flex-wrap items-end justify-between gap-3 text-xs">
-              <div>
-                <label className="block font-bold text-[#A6B2C5] mb-1">
-                  Número de denúncias para suspender loja automaticamente
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  max="50"
-                  value={configDraft.autoSuspendReportsThreshold}
-                  onChange={(e) =>
-                    setConfigDraft({ ...configDraft, autoSuspendReportsThreshold: Number(e.target.value) })
-                  }
-                  className="w-32 p-2 rounded-xl bg-[#111D30] border border-[#26354B] text-white font-bold outline-none"
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() =>
-                  handleSaveSystemConfig(
-                    { autoSuspendReportsThreshold: Math.max(1, configDraft.autoSuspendReportsThreshold) },
-                    "Limite automático de denúncias actualizado ✓"
-                  )
-                }
-                className="px-4 py-2 rounded-xl bg-[#B7F34A] text-slate-950 font-black cursor-pointer"
-              >
-                Guardar Regra
-              </button>
-            </div>
-
-            {reports.length === 0 ? (
-              <div className="p-8 text-center rounded-3xl bg-[#172338] border border-[#26354B] text-xs text-[#A6B2C5]">
-                Nenhuma denúncia pendente de resolução.
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {reports.map((rep) => (
-                  <div
-                    key={rep.id}
-                    className="p-4 rounded-2xl bg-[#172338] border border-[#26354B] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
-                  >
-                    <div className="min-w-0">
-                      <span className="font-bold text-white block text-sm truncate">
-                        {rep.storeName ? `Loja: ${rep.storeName}` : rep.productName || "Denúncia"}
-                      </span>
-                      <p className="text-[#A6B2C5] mt-0.5 break-words">Motivo: {rep.reason}</p>
-                      <span className="text-[10px] text-slate-400 block mt-1 capitalize">Estado: {rep.status}</span>
-                    </div>
-
-                    {rep.status === "pendente" && (
-                      <div className="flex gap-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => handleResolveReport(rep, "resolvido")}
-                          className="px-3.5 py-1.5 rounded-full font-black bg-emerald-500 text-slate-950 cursor-pointer"
-                        >
-                          Marcar Resolvida
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleResolveReport(rep, "rejeitado")}
-                          className="px-3.5 py-1.5 rounded-full font-bold bg-[#111D30] border border-[#26354B] text-[#A6B2C5] cursor-pointer"
-                        >
-                          Rejeitar
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* 7. ENTREGADORES E ENTREGAS */}
-        {activeTab === "entregadores" && (
-          <div className="space-y-6 anim-fadeUp">
-            <h2 className="font-black text-base sm:text-lg">Equipa de Entregas, Taxas e Ocorrências</h2>
-
-            {/* Configurações de Entregas */}
-            <div className="p-4 sm:p-5 rounded-3xl bg-[#172338] border border-[#26354B] grid grid-cols-1 sm:grid-cols-4 gap-3 items-end text-xs">
-              <div>
-                <label className="block font-bold text-[#A6B2C5] mb-1">Taxa de Entrega (Kz)</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={configDraft.defaultDeliveryFee}
-                  onChange={(e) => setConfigDraft({ ...configDraft, defaultDeliveryFee: Number(e.target.value) })}
-                  className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white font-bold outline-none"
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-[#A6B2C5] mb-1">Comissão após entrega (%)</label>
-                <input
-                  type="number"
-                  min="0"
-                  max="90"
-                  value={configDraft.deliveryCommissionPercent}
-                  onChange={(e) =>
-                    setConfigDraft({ ...configDraft, deliveryCommissionPercent: Number(e.target.value) })
-                  }
-                  className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white font-bold outline-none"
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-[#A6B2C5] mb-1">Mensalidade Entregador (Kz)</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={configDraft.courierMonthlyFee}
-                  onChange={(e) => setConfigDraft({ ...configDraft, courierMonthlyFee: Number(e.target.value) })}
-                  className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white font-bold outline-none"
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() =>
-                  handleSaveSystemConfig(
-                    {
-                      defaultDeliveryFee: configDraft.defaultDeliveryFee,
-                      deliveryCommissionPercent: configDraft.deliveryCommissionPercent,
-                      courierMonthlyFee: configDraft.courierMonthlyFee,
-                    },
-                    "Configurações de entregas actualizadas ✓"
-                  )
-                }
-                className="py-2.5 px-4 rounded-xl bg-[#B7F34A] text-slate-950 font-black cursor-pointer"
-              >
-                Guardar Taxas
-              </button>
-            </div>
-
-            {/* Entregadores e Mensalidades */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 text-xs">
-              <div className="p-4 rounded-3xl bg-[#172338] border border-[#26354B] space-y-3">
-                <h3 className="font-black text-sm">Entregadores Registados ({couriers.length})</h3>
-                {couriers.length === 0 ? (
-                  <p className="text-[#A6B2C5]">Nenhum entregador cadastrado ainda.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {couriers.map((c) => (
-                      <div
-                        key={c.id}
-                        className="p-3 rounded-2xl bg-[#111D30] border border-[#26354B] flex items-center justify-between gap-2"
-                      >
-                        <div className="min-w-0">
-                          <span className="font-bold text-white block truncate">
-                            {c.name} ({c.code || "—"})
-                          </span>
-                          <span className="text-[#A6B2C5] block truncate">
-                            BI: {c.biNumber || "—"} · Tel: {c.phone || "—"} · {c.bairro || c.municipality}
-                          </span>
-                        </div>
-                        <div className="flex gap-1.5 shrink-0">
-                          {c.isApproved === false && (
-                            <button
-                              type="button"
-                              onClick={() => handleApproveUser(c, true)}
-                              className="px-3 py-1 rounded-xl bg-emerald-500 text-slate-950 font-black cursor-pointer"
-                            >
-                              Aprovar
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => handleToggleSuspendUser(c)}
-                            className="px-2.5 py-1 rounded-xl border border-[#26354B] text-[#A6B2C5] cursor-pointer"
-                          >
-                            {c.isSuspended ? "Reactivar" : "Suspender"}
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="p-4 rounded-3xl bg-[#172338] border border-[#26354B] space-y-3">
-                <h3 className="font-black text-sm">Controlo de Mensalidades ({courierFees.length})</h3>
-                {courierFees.length === 0 ? (
-                  <p className="text-[#A6B2C5]">Sem mensalidades registadas ainda.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {courierFees.map((f) => (
-                      <div
-                        key={f.id}
-                        className="p-3 rounded-2xl bg-[#111D30] border border-[#26354B] flex items-center justify-between gap-2"
-                      >
-                        <div>
-                          <span className="font-bold text-white block">
-                            {f.courierName || "Entregador"} · {f.referenceMonth}
-                          </span>
-                          <span className="text-[#B7F34A] font-black">{fmtKz(f.amountKz)}</span>
-                          {f.proofUrl && (
-                            <button
-                              type="button"
-                              onClick={() => setPreviewImageUrl(f.proofUrl!)}
-                              className="ml-2 text-[#246BFD] underline cursor-pointer"
-                            >
-                              Ver comprovativo
-                            </button>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          {f.status !== "pago" && (
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                await deliveryRepo.updateMonthlyFeeStatus(f.id, "pago");
-                                await auditRepo.log(currentUser.id, "REVIEW_COURIER_FEE", f.id, { status: "pago" });
-                                showToast("Mensalidade confirmada como paga.");
-                                loadData();
-                              }}
-                              className="px-3 py-1 rounded-xl bg-emerald-500 text-slate-950 font-black cursor-pointer"
-                            >
-                              Confirmar
-                            </button>
-                          )}
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-black capitalize ${
-                              f.status === "pago"
-                                ? "bg-emerald-500/20 text-emerald-400"
-                                : f.status === "atrasado"
-                                ? "bg-red-500/20 text-red-400"
-                                : "bg-amber-500/20 text-amber-400"
-                            }`}
-                          >
-                            {f.status}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Monitorização de Todas as Entregas */}
-            <div className="p-4 rounded-3xl bg-[#172338] border border-[#26354B] space-y-3 text-xs">
-              <h3 className="font-black text-sm">Monitorização de Entregas, Atrasos e Problemas ({deliveries.length})</h3>
-              {deliveries.length === 0 ? (
-                <p className="text-[#A6B2C5]">Ainda não existem entregas registadas.</p>
-              ) : (
-                <div className="space-y-2">
-                  {deliveries.map((d) => (
-                    <div
-                      key={d.id}
-                      className={`p-3.5 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
-                        d.hasDelay || d.status === "Com problema"
-                          ? "bg-red-500/10 border-red-500/40"
-                          : "bg-[#111D30] border-[#26354B]"
-                      }`}
-                    >
-                      <div className="space-y-0.5">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-black text-white">#{d.orderCode || d.orderId.slice(0, 6)}</span>
-                          <span className="px-2 py-0.5 rounded-full bg-[#246BFD] text-white text-[10px] font-bold">
-                            {d.status}
-                          </span>
-                          {(d.hasDelay || d.status === "Com problema") && (
-                            <span className="px-2 py-0.5 rounded-full bg-red-500 text-white text-[10px] font-black">
-                              Atraso / Problema
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[#A6B2C5]">
-                          Loja: {d.storeName || "—"} → Destino: {d.deliveryAddress}
-                        </p>
-                        <p className="text-[#A6B2C5]">
-                          Entregador: <b>{d.courierName || "A aguardar aceitação"}</b> · Taxa: {fmtKz(d.deliveryFee)} ·
-                          Comissão: {d.commissionCharged ? fmtKz(d.commissionAmount) : "Só após entrega"}
-                        </p>
-                        {d.issueDescription && (
-                          <p className="text-amber-300 font-bold">Ocorrência: {d.issueDescription}</p>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* 8. AUDITORIA */}
-        {activeTab === "auditoria" && (
-          <div className="space-y-4 anim-fadeUp">
-            <h2 className="font-black text-base sm:text-lg">Registo de Acções Administrativas</h2>
-            {auditLogs.length === 0 ? (
-              <div className="p-8 text-center rounded-3xl bg-[#172338] border border-[#26354B] text-xs text-[#A6B2C5]">
-                Nenhum registo de auditoria até ao momento.
-              </div>
-            ) : (
-              <div className="rounded-3xl border border-[#26354B] bg-[#172338] overflow-hidden shadow-lg">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-[#111D30] text-[#A6B2C5] uppercase font-bold">
-                      <tr>
-                        <th className="p-3.5">Data e Hora</th>
-                        <th className="p-3.5">Acção</th>
-                        <th className="p-3.5">Alvo</th>
-                        <th className="p-3.5">Administrador</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#26354B]">
-                      {auditLogs.map((log) => {
-                        const adminMatch = users.find((u) => u.id === log.adminId);
-                        const adminLabel = adminMatch ? adminMatch.name || adminMatch.email : "Administrador";
-                        return (
-                          <tr key={log.id} className="hover:bg-[#111D30]/40">
-                            <td className="p-3.5 text-[#A6B2C5] whitespace-nowrap">{fmtDateTime(log.createdAt)}</td>
-                            <td className="p-3.5 font-bold text-[#B7F34A] whitespace-nowrap">
-                              {AUDIT_ACTION_LABELS[log.action] || "Acção administrativa"}
-                            </td>
-                            <td className="p-3.5 text-white whitespace-nowrap">{formatAuditTarget(log.targetId)}</td>
-                            <td className="p-3.5 text-[#A6B2C5] truncate max-w-xs whitespace-nowrap">{adminLabel}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </main>
-
-      {/* Image Preview Modal */}
-      {previewImageUrl && (
+      {/* Drawer Mobile */}
+      {mobileMenuOpen && (
         <div
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
-          onClick={() => setPreviewImageUrl(null)}
+          className="fixed inset-0 z-50 lg:hidden bg-black/70 backdrop-blur-sm flex"
+          onClick={() => setMobileMenuOpen(false)}
         >
-          <div
-            className="relative max-w-lg w-full rounded-3xl overflow-hidden bg-[#172338] border border-[#26354B] p-3"
+          <aside
+            className="w-72 max-w-[85vw] bg-[#172338] border-r border-[#26354B] h-full"
             onClick={(e) => e.stopPropagation()}
           >
+            {renderSidebarContent()}
+          </aside>
+        </div>
+      )}
+
+      {/* Área Principal */}
+      <div className="flex-1 min-w-0 flex flex-col">
+        <header className="sticky top-0 z-40 bg-[#172338]/95 backdrop-blur-md border-b border-[#26354B] px-4 py-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              type="button"
+              onClick={() => setMobileMenuOpen(true)}
+              className="lg:hidden p-2 rounded-xl bg-[#111D30] border border-[#26354B] text-white cursor-pointer"
+              aria-label="Abrir menu lateral"
+            >
+              <Menu size={18} />
+            </button>
+            <div className="min-w-0">
+              <h1 className="font-black text-sm sm:text-base text-white truncate">
+                {visibleNavItems.find((i) => i.id === activeTab)?.label || "Painel Administrativo"}
+              </h1>
+              <span className="text-[11px] text-[#A6B2C5] hidden sm:block truncate">
+                Operação Provincial · Província do Uíge
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => loadData()}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#111D30] border border-[#26354B] text-xs font-bold text-[#A6B2C5] hover:text-white cursor-pointer"
+              aria-label="Recarregar dados"
+            >
+              <RefreshCw size={14} className={loading ? "animate-spin text-[#B7F34A]" : ""} />
+              <span className="hidden sm:inline">Actualizar</span>
+            </button>
+          </div>
+        </header>
+
+        <main className="flex-1 w-full max-w-7xl mx-auto p-4 sm:p-6">
+          {activeTab === "resumo" && (
+            <OverviewSection
+              currentUser={currentUser}
+              users={users}
+              stores={stores}
+              products={products}
+              orders={orders}
+              reports={reports}
+              payments={payments}
+              courierFees={courierFees}
+              deliveries={deliveries}
+              onNavigate={setActiveTab}
+              onSendBroadcast={handleSendBroadcast}
+              onRequestDeleteProduct={requestDeleteProduct}
+            />
+          )}
+
+          {activeTab === "aprovacoes" && (
+            <ApprovalsSection
+              stores={stores}
+              users={users}
+              onPreviewImage={setPreviewImageUrl}
+              onApprove={requestApproveEntry}
+              onReject={requestRejectEntry}
+              onRequestCorrection={requestCorrectionEntry}
+            />
+          )}
+
+          {activeTab === "lojas" && (
+            <StoresSection
+              currentUser={currentUser}
+              stores={stores}
+              onPreviewImage={setPreviewImageUrl}
+              onApproveStore={(s) => requestApproveEntry({ kind: "loja", store: s })}
+              onSuspendStore={requestSuspendStore}
+              onToggleVip={requestToggleVip}
+            />
+          )}
+
+          {activeTab === "utilizadores" && (
+            <UsersSection
+              currentUser={currentUser}
+              users={users}
+              onApproveUser={(u) => requestApproveEntry({ kind: "utilizador", user: u })}
+              onSuspendUser={requestSuspendUser}
+            />
+          )}
+
+          {activeTab === "encomendas" && <OrdersSection orders={orders} stores={stores} />}
+
+          {activeTab === "pagamentos" && (
+            <PaymentsSection
+              payments={payments}
+              onPreviewImage={setPreviewImageUrl}
+              onConfirmPayment={requestConfirmPayment}
+              onRejectPayment={requestRejectPayment}
+            />
+          )}
+
+          {activeTab === "anuncios" && (
+            <AdsSection
+              ads={ads}
+              stores={stores}
+              onCreateAd={handleCreateAdminAd}
+              onToggleAd={requestToggleAd}
+              onDeleteAd={requestDeleteAd}
+            />
+          )}
+
+          {activeTab === "entregas" && (
+            <DeliveriesSection
+              currentUser={currentUser}
+              deliveries={deliveries}
+              courierFees={courierFees}
+              onPreviewImage={setPreviewImageUrl}
+              onConfirmMonthlyFee={requestConfirmMonthlyFee}
+            />
+          )}
+
+          {activeTab === "denuncias" && (
+            <ReportsSection reports={reports} onResolveReport={requestResolveReport} />
+          )}
+
+          {activeTab === "configuracoes" && (
+            <ConfigSection
+              currentUser={currentUser}
+              systemConfig={systemConfig}
+              users={users}
+              onRequestSaveConfig={requestSaveConfig}
+              onRequestChangeRole={requestChangeRole}
+            />
+          )}
+
+          {activeTab === "auditoria" && <AuditSection auditLogs={auditLogs} users={users} />}
+
+          {activeTab === "controlo" && isSuperAdminRole(currentUser.role) && (
+            <ControlCenterSection
+              currentUser={currentUser}
+              systemConfig={systemConfig}
+              nocChecks={nocChecks}
+              nocHistory={nocHistory}
+              nocRunning={nocRunning}
+              systemEvents={systemEvents}
+              metrics={healthMetrics}
+              appErrors={appErrors}
+              operationTimings={operationTimings}
+              users={users}
+              stores={stores}
+              onRunNocChecks={runNocProbes}
+              onRefreshMetrics={refreshHealthMetrics}
+              onRequestToggleMaintenance={requestToggleMaintenance}
+              onResolveSystemEvent={handleResolveSystemEvent}
+              onBlockUserFromSoc={requestBlockUserFromSoc}
+              onSuspendStoreFromSoc={requestSuspendStoreFromSoc}
+              onRequestClearAppErrors={requestClearAppErrors}
+            />
+          )}
+        </main>
+      </div>
+
+      {/* Modal de Confirmação Antes de Acções Graves */}
+      <ConfirmModal
+        open={Boolean(confirmState?.open)}
+        title={confirmState?.title || ""}
+        description={confirmState?.description || ""}
+        confirmLabel={confirmState?.confirmLabel}
+        tone={confirmState?.tone}
+        requireReason={confirmState?.requireReason}
+        reasonLabel={confirmState?.reasonLabel}
+        reasonPlaceholder={confirmState?.reasonPlaceholder}
+        loading={confirmLoading}
+        onCancel={() => !confirmLoading && setConfirmState(null)}
+        onConfirm={handleRunConfirmedAction}
+      />
+
+      {/* Lightbox para BI, Fachada e Comprovativos */}
+      {previewImageUrl && (
+        <div
+          className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setPreviewImageUrl(null)}
+        >
+          <div className="relative max-w-2xl w-full bg-[#172338] rounded-2xl p-3 border border-[#26354B]">
             <button
               type="button"
               onClick={() => setPreviewImageUrl(null)}
-              className="absolute top-4 right-4 p-2 rounded-full bg-black/70 text-white cursor-pointer"
-              aria-label="Fechar imagem"
+              className="absolute -top-3 -right-3 w-8 h-8 rounded-full bg-white text-slate-900 flex items-center justify-center shadow-lg cursor-pointer"
+              aria-label="Fechar pré-visualização"
             >
               <X size={16} />
             </button>
-            <img src={previewImageUrl} alt="Documento ou Comprovativo" className="w-full max-h-[75vh] object-contain rounded-2xl" />
+            <img
+              src={previewImageUrl}
+              alt="Documento em análise"
+              className="w-full max-h-[75vh] object-contain rounded-xl"
+            />
           </div>
         </div>
       )}
 
+      {/* Toast Flutuante */}
       {toast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 max-w-[calc(100vw-24px)] px-4 sm:px-5 py-3 rounded-2xl font-black text-xs shadow-2xl bg-[#B7F34A] text-slate-950 flex items-center justify-center gap-2 text-center">
-          <CheckCircle2 size={16} className="shrink-0" />
-          <span className="break-words">{toast}</span>
+        <div className="fixed bottom-5 right-5 z-50 px-4 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black text-xs shadow-2xl anim-pop">
+          {toast}
         </div>
       )}
     </div>

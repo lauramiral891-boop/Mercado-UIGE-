@@ -17,6 +17,13 @@ import {
   StoreType,
   PlanType,
   AdPosition,
+  ApprovalStatus,
+  UserRole,
+  SystemEvent,
+  SystemEventSeverity,
+  AppErrorRecord,
+  SystemHealthMetrics,
+  NocServiceCheck,
 } from "../types";
 import { SearchPersonalization } from "../lib/utils";
 
@@ -79,7 +86,9 @@ export interface IUserRepo {
   getAll(): Promise<User[]>;
   updateProfile(id: string, updates: Partial<User>): Promise<User>;
   approveUser(id: string, isApproved: boolean): Promise<void>;
+  updateApproval(id: string, status: ApprovalStatus, note?: string): Promise<void>;
   suspendUser(id: string, isSuspended: boolean): Promise<void>;
+  setRole(id: string, role: UserRole): Promise<void>;
   setPlan(id: string, planType: PlanType, durationDays?: number): Promise<void>;
   deleteAccount(id: string): Promise<void>;
 }
@@ -90,6 +99,7 @@ export interface IStoreRepo {
   create(store: Partial<Store>): Promise<Store>;
   toggleVip(id: string, isVip: boolean): Promise<void>;
   toggleApproval(id: string, isApproved: boolean): Promise<void>;
+  updateApproval(id: string, status: ApprovalStatus, note?: string): Promise<void>;
   suspendStore(id: string, isSuspended: boolean, reason?: string): Promise<void>;
   setPlan(id: string, planType: PlanType, durationDays?: number): Promise<void>;
 }
@@ -159,4 +169,31 @@ export interface ISystemConfigRepo {
 export interface IAuditRepo {
   getAll(): Promise<AuditLogItem[]>;
   log(adminId: string, action: string, target?: string, details?: any): Promise<void>;
+}
+
+export interface ISystemEventRepo {
+  getAll(): Promise<SystemEvent[]>;
+  record(event: {
+    type: string;
+    severity?: SystemEventSeverity;
+    userEmail?: string | null;
+    detail: string;
+  }): Promise<void>;
+  resolve(id: string, resolved?: boolean): Promise<void>;
+}
+
+export interface IAppErrorRepo {
+  getAll(): Promise<AppErrorRecord[]>;
+  report(error: {
+    screen: string;
+    message: string;
+    source?: string;
+    durationMs?: number;
+  }): Promise<void>;
+  clearAll(): Promise<void>;
+}
+
+export interface ISystemHealthRepo {
+  getMetrics(): Promise<SystemHealthMetrics>;
+  runNocChecks(): Promise<NocServiceCheck[]>;
 }

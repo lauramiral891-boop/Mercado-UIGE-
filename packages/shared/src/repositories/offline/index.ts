@@ -16,6 +16,13 @@ import {
   SystemConfig,
   AdPosition,
   PlanType,
+  ApprovalStatus,
+  UserRole,
+  SystemEvent,
+  SystemEventSeverity,
+  AppErrorRecord,
+  SystemHealthMetrics,
+  NocServiceCheck,
 } from "../../types";
 import {
   IProductRepo,
@@ -31,6 +38,9 @@ import {
   IDeliveryRepo,
   ISystemConfigRepo,
   IAuditRepo,
+  ISystemEventRepo,
+  IAppErrorRepo,
+  ISystemHealthRepo,
   ProductFilters,
 } from "../types";
 import {
@@ -64,8 +74,13 @@ import {
   saveSystemConfig,
   getStoredAuditLogs,
   saveAuditLogs,
+  getStoredSystemEvents,
+  saveSystemEvents,
+  getStoredAppErrors,
+  saveAppErrors,
 } from "../../lib/storage";
 import { smartSearch, generateOrderCode, generateDeliveryCode } from "../../lib/utils";
+import { allowTelemetryWrite, sanitizeTelemetryText } from "../../lib/observability";
 
 export interface SyncAction {
   id: string;
@@ -556,17 +571,48 @@ export class OfflineUserRepo implements IUserRepo {
   }
 
   async approveUser(id: string, isApproved: boolean): Promise<void> {
-    const users = getStoredUsers().map((u) => (u.id === id ? { ...u, isApproved } : u));
+    await this.updateApproval(id, isApproved ? "aprovado" : "pendente");
+  }
+
+  async updateApproval(id: string, status: ApprovalStatus, note?: string): Promise<void> {
+    const isApproved = status === "aprovado";
+    const cleanNote = note ? note.trim() : null;
+    const users = getStoredUsers().map((u) =>
+      u.id === id
+        ? {
+            ...u,
+            isApproved,
+            approvalStatus: status,
+            rejectionReason: status === "rejeitado" ? cleanNote : u.rejectionReason ?? null,
+            correctionNote: status === "correcao" ? cleanNote : u.correctionNote ?? null,
+          }
+        : u
+    );
     saveUsers(users);
     const current = getStoredCurrentUser();
     if (current && current.id === id) {
-      saveCurrentUser({ ...current, isApproved });
+      saveCurrentUser({
+        ...current,
+        isApproved,
+        approvalStatus: status,
+        rejectionReason: status === "rejeitado" ? cleanNote : current.rejectionReason ?? null,
+        correctionNote: status === "correcao" ? cleanNote : current.correctionNote ?? null,
+      });
     }
   }
 
   async suspendUser(id: string, isSuspended: boolean): Promise<void> {
     const users = getStoredUsers().map((u) => (u.id === id ? { ...u, isSuspended } : u));
     saveUsers(users);
+  }
+
+  async setRole(id: string, role: UserRole): Promise<void> {
+    const users = getStoredUsers().map((u) => (u.id === id ? { ...u, role } : u));
+    saveUsers(users);
+    const current = getStoredCurrentUser();
+    if (current && current.id === id) {
+      saveCurrentUser({ ...current, role });
+    }
   }
 
   async setPlan(id: string, planType: PlanType, durationDays = 30): Promise<void> {
@@ -678,7 +724,23 @@ export class OfflineStoreRepo implements IStoreRepo {
   }
 
   async toggleApproval(id: string, isApproved: boolean): Promise<void> {
-    const stores = getStoredStores().map((s) => (s.id === id ? { ...s, isApproved } : s));
+    await this.updateApproval(id, isApproved ? "aprovado" : "pendente");
+  }
+
+  async updateApproval(id: string, status: ApprovalStatus, note?: string): Promise<void> {
+    const isApproved = status === "aprovado";
+    const cleanNote = note ? note.trim() : null;
+    const stores = getStoredStores().map((s) =>
+      s.id === id
+        ? {
+            ...s,
+            isApproved,
+            approvalStatus: status,
+            rejectionReason: status === "rejeitado" ? cleanNote : s.rejectionReason ?? null,
+            correctionNote: status === "correcao" ? cleanNote : s.correctionNote ?? null,
+          }
+        : s
+    );
     saveStores(stores);
   }
 
@@ -1142,5 +1204,139 @@ export class OfflineAuditRepo implements IAuditRepo {
       createdAt: new Date().toISOString(),
     };
     saveAuditLogs([item, ...getStoredAuditLogs()].slice(0, 200));
+  }
+}
+
+// 13. REPOSITÓRIO OFFLINE DE EVENTOS SOC
+export class OfflineSystemEventRepo implements ISystemEventRepo {
+  async getAll(): Promise<SystemEvent[]> {
+    return getStoredSystemEvents();
+  }
+
+  async record(event: {
+    type: string;
+    severity?: SystemEventSeverity;
+    userEmail?: string | null;
+    detail: string;
+  }): Promise<void> {
+    const safeType = sanitizeTelemetryText(event.type || "EVENTO_SISTEMA", 60) || "EVENTO_SISTEMA";
+    if (!allowTelemetryWrite(`soc:${safeType}`, 15)) return;
+
+    const current = getStoredCurrentUser();
+    const item: SystemEvent = {
+      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      type: safeType,
+      severity: event.severity || "info",
+      userId: current?.id || null,
+      userEmail: event.userEmail ? sanitizeTelemetryText(event.userEmail, 120) : current?.email || null,
+      detail: sanitizeTelemetryText(event.detail, 260) || "Evento registado",
+      resolved: false,
+      createdAt: new Date().toISOString(),
+    };
+    saveSystemEvents([item, ...getStoredSystemEvents()].slice(0, 200));
+  }
+
+  async resolve(id: string, resolved = true): Promise<void> {
+    saveSystemEvents(getStoredSystemEvents().map((e) => (e.id === id ? { ...e, resolved } : e)));
+  }
+}
+
+// 14. REPOSITÓRIO OFFLINE DE OBSERVABILIDADE (ERROS AGRUPADOS POR ECRÃ)
+export class OfflineAppErrorRepo implements IAppErrorRepo {
+  async getAll(): Promise<AppErrorRecord[]> {
+    return getStoredAppErrors().sort(
+      (a, b) => new Date(b.lastOccurredAt).getTime() - new Date(a.lastOccurredAt).getTime()
+    );
+  }
+
+  async report(error: {
+    screen: string;
+    message: string;
+    source?: string;
+    durationMs?: number;
+  }): Promise<void> {
+    const screen = sanitizeTelemetryText(error.screen || "geral", 60) || "geral";
+    if (!allowTelemetryWrite(`err:${screen}`, 20)) return;
+
+    const message = sanitizeTelemetryText(error.message || "Erro operacional", 160) || "Erro operacional";
+    const source = sanitizeTelemetryText(error.source || "runtime", 40) || "runtime";
+    const now = new Date().toISOString();
+
+    const list = getStoredAppErrors();
+    const existing = list.find((e) => e.screen === screen && e.message === message && e.source === source);
+    if (existing) {
+      const updated = list.map((e) =>
+        e.id === existing.id
+          ? {
+              ...e,
+              count: e.count + 1,
+              durationMs: error.durationMs ?? e.durationMs ?? null,
+              lastOccurredAt: now,
+            }
+          : e
+      );
+      saveAppErrors(updated);
+      return;
+    }
+
+    const item: AppErrorRecord = {
+      id: `app_err_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      screen,
+      message,
+      source,
+      count: 1,
+      durationMs: error.durationMs ?? null,
+      lastOccurredAt: now,
+      createdAt: now,
+    };
+    saveAppErrors([item, ...list].slice(0, 100));
+  }
+
+  async clearAll(): Promise<void> {
+    saveAppErrors([]);
+  }
+}
+
+// 15. REPOSITÓRIO OFFLINE DE MÉTRICAS NOC / ITOM
+export class OfflineSystemHealthRepo implements ISystemHealthRepo {
+  async getMetrics(): Promise<SystemHealthMetrics> {
+    const users = getStoredUsers();
+    const stores = getStoredStores();
+    const products = getStoredProducts();
+    const orders = getStoredOrders();
+    const payments = getStoredMerchantPayments();
+    const events = getStoredSystemEvents();
+    const errors = getStoredAppErrors();
+
+    const approxDbBytes =
+      (users.length * 600 + stores.length * 1200 + products.length * 1500 + orders.length * 1400) || 16384;
+    const imageCount =
+      products.length +
+      stores.filter((s) => Boolean(s.facadeImage || s.biPhotoUrl)).length +
+      payments.filter((p) => Boolean(p.proofUrl)).length;
+
+    return {
+      dbBytes: approxDbBytes,
+      storageBytes: imageCount * 95_000,
+      storageFiles: imageCount,
+      totalUsers: users.length,
+      storesCount: stores.length,
+      productsCount: products.length,
+      ordersCount: orders.length,
+      pendingPayments: payments.filter((p) => p.status === "pendente").length,
+      openSecurityAlerts: events.filter((e) => !e.resolved && (e.severity === "alta" || e.severity === "critica")).length,
+      errorGroups: errors.length,
+      collectedAt: new Date().toISOString(),
+    };
+  }
+
+  async runNocChecks(): Promise<NocServiceCheck[]> {
+    const now = new Date().toISOString();
+    return [
+      { id: "database", label: "Base de Dados", status: "operacional", latencyMs: 12, detail: "Armazenamento local activo", checkedAt: now },
+      { id: "auth", label: "Login e OTP", status: "operacional", latencyMs: 18, detail: "Sessão local pronta", checkedAt: now },
+      { id: "storage", label: "Storage de Fotos", status: "operacional", latencyMs: 15, detail: "Modo local sem ligação remota", checkedAt: now },
+      { id: "site", label: "Portal Web", status: "operacional", latencyMs: 8, detail: "Interface administrativa activa", checkedAt: now },
+    ];
   }
 }

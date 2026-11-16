@@ -12,6 +12,9 @@ import {
   SupabaseDeliveryRepo,
   SupabaseSystemConfigRepo,
   SupabaseAuditRepo,
+  SupabaseSystemEventRepo,
+  SupabaseAppErrorRepo,
+  SupabaseSystemHealthRepo,
   createRemoteSyncHandlers,
 } from "./supabase";
 import { syncQueue } from "./offline";
@@ -29,6 +32,9 @@ export const paymentRepo = new SupabasePaymentRepo();
 export const deliveryRepo = new SupabaseDeliveryRepo();
 export const systemConfigRepo = new SupabaseSystemConfigRepo();
 export const auditRepo = new SupabaseAuditRepo();
+export const systemEventRepo = new SupabaseSystemEventRepo();
+export const appErrorRepo = new SupabaseAppErrorRepo();
+export const systemHealthRepo = new SupabaseSystemHealthRepo();
 
 export const remoteSyncHandlers = createRemoteSyncHandlers(orderRepo, messageRepo, productRepo);
 export { syncQueue };

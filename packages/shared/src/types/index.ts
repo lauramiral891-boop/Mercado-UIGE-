@@ -1,4 +1,13 @@
-export type UserRole = "cliente" | "comerciante" | "entregador" | "admin";
+export type UserRole =
+  | "cliente"
+  | "comerciante"
+  | "entregador"
+  | "admin"
+  | "super_admin"
+  | "moderador"
+  | "financeiro";
+
+export type ApprovalStatus = "pendente" | "aprovado" | "rejeitado" | "correcao";
 
 export type StoreType = "loja_fixa" | "vendedor_ambulante";
 
@@ -29,6 +38,9 @@ export interface User {
   biPhotoUrl?: string | null;
   residesInUigeConfirmed?: boolean;
   isApproved?: boolean;
+  approvalStatus?: ApprovalStatus;
+  rejectionReason?: string | null;
+  correctionNote?: string | null;
   walletBalance: number;
   isSuspended?: boolean;
   isVerified?: boolean;
@@ -64,6 +76,9 @@ export interface Store {
   logo: string;
   cover?: string;
   isApproved: boolean;
+  approvalStatus?: ApprovalStatus;
+  rejectionReason?: string | null;
+  correctionNote?: string | null;
   isSuspended?: boolean;
   suspensionReason?: string | null;
   isVip: boolean;
@@ -298,6 +313,8 @@ export interface SystemConfig {
   ambulantVipPrice: number;
   courierBasicPrice: number;
   courierVipPrice: number;
+  maintenanceMode?: boolean;
+  maintenanceMessage?: string;
 }
 
 export interface AuditLogItem {
@@ -309,6 +326,60 @@ export interface AuditLogItem {
   targetId: string;
   details?: any;
   createdAt: string;
+}
+
+export type SystemEventSeverity = "info" | "aviso" | "alta" | "critica";
+
+export interface SystemEvent {
+  id: string;
+  type: string;
+  severity: SystemEventSeverity;
+  userId?: string | null;
+  userEmail?: string | null;
+  detail: string;
+  resolved: boolean;
+  createdAt: string;
+}
+
+export interface AppErrorRecord {
+  id: string;
+  screen: string;
+  message: string;
+  source: string;
+  count: number;
+  durationMs?: number | null;
+  lastOccurredAt: string;
+  createdAt: string;
+}
+
+export interface SystemHealthMetrics {
+  dbBytes: number;
+  storageBytes: number;
+  storageFiles: number;
+  totalUsers: number;
+  storesCount: number;
+  productsCount: number;
+  ordersCount: number;
+  pendingPayments: number;
+  openSecurityAlerts: number;
+  errorGroups: number;
+  collectedAt: string;
+}
+
+export interface NocServiceCheck {
+  id: "database" | "auth" | "storage" | "site";
+  label: string;
+  status: "operacional" | "degradado" | "indisponivel";
+  latencyMs: number;
+  detail: string;
+  checkedAt: string;
+}
+
+export interface NocHistorySample {
+  timestamp: string;
+  overallStatus: "operacional" | "degradado" | "indisponivel";
+  avgLatencyMs: number;
+  checks: Record<NocServiceCheck["id"], number>;
 }
 
 export type ThemeMode = "dark" | "light" | "system";

@@ -1,8 +1,15 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import fs from "fs";
 import path from "path";
-import { OfflineOrderRepo, OfflineProductRepo, OfflineSystemConfigRepo } from "../offline";
+import {
+  OfflineOrderRepo,
+  OfflineProductRepo,
+  OfflineSystemConfigRepo,
+  OfflineSystemEventRepo,
+  OfflineAppErrorRepo,
+} from "../offline";
 import { saveProducts } from "../../lib/storage";
+import { resetTelemetryRateLimits, sanitizeTelemetryText, allowTelemetryWrite } from "../../lib/observability";
 
 function mockLocalStorage() {
   let store: Record<string, string> = {};
@@ -207,12 +214,13 @@ class ServerTriggerSimulator {
   directUpdateOrderTotals(
     orderId: string,
     patch: { subtotal?: number; total?: number; taxa_entrega?: number },
-    actor: { role: "cliente" | "comerciante" | "admin"; isSystem?: boolean }
+    actor: { role: "cliente" | "comerciante" | "admin" | "super_admin" | "moderador" | "financeiro"; isSystem?: boolean }
   ) {
     const old = this.encomendas.get(orderId);
     if (!old) throw new Error("Encomenda não encontrada.");
     const next = { ...old, ...patch };
-    if (actor.role !== "admin" && !actor.isSystem) {
+    const isPrivileged = actor.role === "admin" || actor.role === "super_admin";
+    if (!isPrivileged && !actor.isSystem) {
       if (
         next.subtotal !== old.subtotal ||
         next.total !== old.total ||
@@ -226,11 +234,38 @@ class ServerTriggerSimulator {
     this.encomendas.set(orderId, next);
     return next;
   }
+
+  checkRolePermission(
+    actorRole: "cliente" | "comerciante" | "entregador" | "moderador" | "financeiro" | "super_admin",
+    action:
+      | "approve_store"
+      | "confirm_payment"
+      | "change_role"
+      | "toggle_maintenance"
+      | "read_soc_events"
+      | "read_app_errors"
+  ) {
+    const isSuper = actorRole === "super_admin";
+    const isMod = isSuper || actorRole === "moderador";
+    const isFin = isSuper || actorRole === "financeiro";
+
+    if (action === "approve_store" && !isMod) {
+      throw new Error("Apenas moderador ou super_admin pode aprovar lojas.");
+    }
+    if (action === "confirm_payment" && !isFin) {
+      throw new Error("Apenas financeiro ou super_admin pode confirmar pagamentos.");
+    }
+    if ((action === "change_role" || action === "toggle_maintenance" || action === "read_soc_events" || action === "read_app_errors") && !isSuper) {
+      throw new Error("Apenas super_admin tem acesso a esta operação.");
+    }
+    return true;
+  }
 }
 
-describe("Migração 20250105 — Bloqueios Admin e Cálculo de Encomendas no Servidor", () => {
+describe("Migração 20250105 — Bloqueios Admin, Papéis de Equipa e Centro de Controlo", () => {
   beforeEach(() => {
     mockLocalStorage();
+    resetTelemetryRateLimits();
   });
 
   it("1. Ficheiro SQL 20250105 define todos os triggers de bloqueio e cálculo no servidor", () => {
@@ -474,5 +509,84 @@ describe("Migração 20250105 — Bloqueios Admin e Cálculo de Encomendas no Se
     expect(pickupOrder.subtotal).toBe(15000);
     expect(pickupOrder.deliveryFee).toBe(0);
     expect(pickupOrder.total).toBe(15000);
+  });
+
+  it("6. FASE 0 SQL define papéis de equipa (super_admin, moderador, financeiro), RLS do Centro de Controlo e promoção de admin", () => {
+    const sql = fs.readFileSync(MIGRATION_PATH, "utf-8");
+
+    expect(sql).toContain("('cliente', 'comerciante', 'entregador', 'admin', 'super_admin', 'moderador', 'financeiro')");
+    expect(sql).toContain("SET papel = 'super_admin'");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION public.is_super_admin()");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION public.is_moderator()");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION public.is_finance()");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS public.eventos_sistema");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS public.erros_app");
+    expect(sql).toContain("ALTER TABLE public.eventos_sistema ENABLE ROW LEVEL SECURITY");
+    expect(sql).toContain("ALTER TABLE public.erros_app ENABLE ROW LEVEL SECURITY");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION public.get_system_health_metrics()");
+    expect(sql).toContain("CREATE TRIGGER trg_proteger_configuracoes_sistema");
+  });
+
+  it("7. Enforça permissões por papel: moderador vs financeiro vs super_admin", () => {
+    const db = new ServerTriggerSimulator();
+
+    // Moderador aprova lojas, mas não confirma pagamentos nem acede ao Centro de Controlo
+    expect(db.checkRolePermission("moderador", "approve_store")).toBe(true);
+    expect(() => db.checkRolePermission("moderador", "confirm_payment")).toThrow(/financeiro/);
+    expect(() => db.checkRolePermission("moderador", "change_role")).toThrow(/super_admin/);
+    expect(() => db.checkRolePermission("moderador", "read_soc_events")).toThrow(/super_admin/);
+
+    // Financeiro confirma pagamentos, mas não aprova lojas nem altera manutenção/papéis
+    expect(db.checkRolePermission("financeiro", "confirm_payment")).toBe(true);
+    expect(() => db.checkRolePermission("financeiro", "approve_store")).toThrow(/moderador/);
+    expect(() => db.checkRolePermission("financeiro", "toggle_maintenance")).toThrow(/super_admin/);
+    expect(() => db.checkRolePermission("financeiro", "read_app_errors")).toThrow(/super_admin/);
+
+    // Super Admin tem acesso total
+    expect(db.checkRolePermission("super_admin", "approve_store")).toBe(true);
+    expect(db.checkRolePermission("super_admin", "confirm_payment")).toBe(true);
+    expect(db.checkRolePermission("super_admin", "change_role")).toBe(true);
+    expect(db.checkRolePermission("super_admin", "toggle_maintenance")).toBe(true);
+    expect(db.checkRolePermission("super_admin", "read_soc_events")).toBe(true);
+    expect(db.checkRolePermission("super_admin", "read_app_errors")).toBe(true);
+  });
+
+  it("8. Sanitiza chaves/senhas/tokens antes de guardar em eventos_sistema e erros_app e agrupa erros por ecrã", async () => {
+    const dirty = "Erro login password=segredo123 key=sb_secret_abcDEF999 token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.xyz";
+    const clean = sanitizeTelemetryText(dirty);
+    expect(clean).not.toContain("segredo123");
+    expect(clean).not.toContain("sb_secret_abcDEF999");
+    expect(clean).not.toContain("eyJhbGciOiJIUzI1NiJ9");
+
+    const eventRepo = new OfflineSystemEventRepo();
+    await eventRepo.record({
+      type: "LOGIN_FALHADO",
+      severity: "aviso",
+      userEmail: "teste@uige.ao",
+      detail: dirty,
+    });
+    const events = await eventRepo.getAll();
+    expect(events.length).toBe(1);
+    expect(events[0].detail).not.toContain("segredo123");
+    expect(events[0].detail).not.toContain("sb_secret_abcDEF999");
+
+    const errRepo = new OfflineAppErrorRepo();
+    await errRepo.report({ screen: "Encomendas", message: dirty, source: "api", durationMs: 410 });
+    await errRepo.report({ screen: "Encomendas", message: dirty, source: "api", durationMs: 280 });
+    const errors = await errRepo.getAll();
+    expect(errors.length).toBe(1);
+    expect(errors[0].count).toBe(2);
+    expect(errors[0].screen).toBe("Encomendas");
+    expect(errors[0].durationMs).toBe(280);
+    expect(errors[0].message).not.toContain("sb_secret_");
+  });
+
+  it("9. Limite de taxa bloqueia spam de escrita na observabilidade e SOC", () => {
+    for (let i = 0; i < 15; i++) {
+      expect(allowTelemetryWrite("test:spam", 15, 100000 + i)).toBe(true);
+    }
+    expect(allowTelemetryWrite("test:spam", 15, 100020)).toBe(false);
+    // Após 61 segundos volta a permitir
+    expect(allowTelemetryWrite("test:spam", 15, 162000)).toBe(true);
   });
 });

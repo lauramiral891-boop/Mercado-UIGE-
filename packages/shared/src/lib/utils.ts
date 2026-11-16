@@ -8,6 +8,12 @@ export const fmtKz = (n: number | string | undefined | null) => {
 
 export function formatUserRole(role?: string | null): string {
   switch ((role || "").toLowerCase()) {
+    case "super_admin":
+      return "Super Administrador";
+    case "moderador":
+      return "Moderador";
+    case "financeiro":
+      return "Financeiro";
     case "admin":
       return "Administrador";
     case "comerciante":
@@ -17,6 +23,26 @@ export function formatUserRole(role?: string | null): string {
     default:
       return "Cliente";
   }
+}
+
+export function isSuperAdminRole(role?: string | null): boolean {
+  const r = (role || "").toLowerCase();
+  return r === "super_admin" || r === "admin";
+}
+
+export function isModeratorRole(role?: string | null): boolean {
+  const r = (role || "").toLowerCase();
+  return r === "super_admin" || r === "admin" || r === "moderador";
+}
+
+export function isFinanceRole(role?: string | null): boolean {
+  const r = (role || "").toLowerCase();
+  return r === "super_admin" || r === "admin" || r === "financeiro";
+}
+
+export function isAnyAdminRole(role?: string | null): boolean {
+  const r = (role || "").toLowerCase();
+  return r === "super_admin" || r === "admin" || r === "moderador" || r === "financeiro";
 }
 
 export function formatStoreType(type?: StoreType | string | null): string {
