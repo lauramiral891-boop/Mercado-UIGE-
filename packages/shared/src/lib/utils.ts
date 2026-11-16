@@ -200,6 +200,26 @@ export function translateErrorMessage(
     return "Vendedor ambulante exige fotografia do BI e telefone.";
   }
 
+  if (
+    msg.includes("excede") ||
+    msg.includes("demasiado grande") ||
+    msg.includes("maximum allowed size") ||
+    msg.includes("payload too large") ||
+    msg.includes("413")
+  ) {
+    return raw.includes("mb") || raw.includes("segundos") ? raw : "O ficheiro excede o limite de 20 MB.";
+  }
+
+  if (
+    msg.includes("mime") ||
+    msg.includes("não suportado") ||
+    msg.includes("vídeo") ||
+    msg.includes("compressão") ||
+    msg.includes("url público")
+  ) {
+    return raw;
+  }
+
   if (msg.includes("duplicate") || msg.includes("already exists") || msg.includes("unique")) {
     return "Este registo já foi enviado.";
   }

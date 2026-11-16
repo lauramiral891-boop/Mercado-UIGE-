@@ -13,7 +13,11 @@ export type StoreType = "loja_fixa" | "vendedor_ambulante";
 
 export type PlanType = "gratis" | "basico" | "vip";
 
-export type AdPosition = "topo" | "categoria" | "pesquisa";
+export type AdPosition = "topo" | "faixa" | "categoria" | "pesquisa" | "ecra_inteiro";
+
+export type AdAdvertiserType = "plataforma" | "externo" | "loja";
+
+export type AdDestinationType = "loja" | "produto" | "link" | "whatsapp";
 
 export type DeliveryStatus =
   | "Pedido"
@@ -224,6 +228,8 @@ export interface StoreReview {
 
 export interface SponsoredAd {
   id: string;
+  advertiserType?: AdAdvertiserType;
+  advertiserName?: string;
   storeId?: string;
   sellerId: string;
   productId?: string;
@@ -234,6 +240,10 @@ export interface SponsoredAd {
   storeIsSuspended?: boolean;
   storeImage?: string;
   productName?: string;
+  destinationType?: AdDestinationType;
+  destinationValue?: string;
+  paymentAmountKz?: number;
+  paymentProofUrl?: string;
   title: string;
   subtitle?: string;
   imageUrl: string;
@@ -253,10 +263,11 @@ export interface MerchantPayment {
   id: string;
   sellerId: string;
   sellerName?: string;
+  advertiserName?: string;
   storeId?: string;
   storeName?: string;
   userRoleType?: "loja_fixa" | "vendedor_ambulante" | "entregador";
-  type: "plano" | "anuncio";
+  type: "plano" | "anuncio" | "anuncio_externo";
   targetPlan?: PlanType;
   adId?: string;
   amountKz: number;

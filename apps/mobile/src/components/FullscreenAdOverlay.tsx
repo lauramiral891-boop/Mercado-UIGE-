@@ -61,13 +61,19 @@ export const FullscreenAdOverlay: React.FC<FullscreenAdOverlayProps> = ({
   const cellularMode = isCellularConnection();
   const posterSrc = ad.imageUrl || store?.facadeImage || store?.logo || ad.storeImage || "";
   const showPosterOnly = isVideo && cellularMode && !cellularPlayAllowed;
-  const storeTitle = store?.name || ad.storeName || "Loja Parceira";
+  const sponsorTitle = ad.advertiserName || store?.name || ad.storeName || "Mercado Uíge";
+  const ctaLabel =
+    ad.destinationType === "whatsapp"
+      ? "Contactar no WhatsApp"
+      : ad.destinationType === "link"
+      ? "Abrir oferta externa"
+      : `Visitar ${sponsorTitle}`;
 
   return (
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={`Anúncio patrocinado de ${storeTitle}`}
+      aria-label={`Anúncio patrocinado de ${sponsorTitle}`}
       className="fixed inset-0 z-50 bg-[#07111F] text-white flex flex-col justify-between select-none"
       onClick={() => onOpenStore(ad)}
     >
@@ -106,7 +112,7 @@ export const FullscreenAdOverlay: React.FC<FullscreenAdOverlayProps> = ({
           <span className="px-2.5 py-1 rounded-md bg-[#B7F34A] text-slate-950 font-black text-[11px] uppercase tracking-wider shrink-0">
             Patrocinado
           </span>
-          <span className="text-xs font-bold text-white/90 truncate">{storeTitle}</span>
+          <span className="text-xs font-bold text-white/90 truncate">{sponsorTitle}</span>
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
@@ -183,7 +189,7 @@ export const FullscreenAdOverlay: React.FC<FullscreenAdOverlayProps> = ({
           className="w-full sm:w-auto min-h-[48px] px-6 py-3 rounded-2xl bg-[#B7F34A] text-slate-950 font-black text-sm inline-flex items-center justify-center gap-2 shadow-2xl cursor-pointer"
         >
           <StoreIcon size={17} />
-          <span>Visitar {storeTitle}</span>
+          <span>{ctaLabel}</span>
           <ChevronRight size={17} />
         </button>
 

@@ -10,6 +10,8 @@ import {
 } from "@mercado-uige/shared";
 import { Header } from "../components/Header";
 import { BottomNav } from "../components/BottomNav";
+import { BottomAdStrip } from "../components/BottomAdStrip";
+import { WantToSellModal } from "../components/WantToSellModal";
 import { ProductCard } from "../components/ProductCard";
 import { ProductDetailModal } from "../components/ProductDetailModal";
 import { AuthModal } from "../components/AuthModal";
@@ -23,7 +25,7 @@ import { SponsoredMediaView } from "../components/SponsoredMediaView";
 import { FullscreenAdOverlay } from "../components/FullscreenAdOverlay";
 import { MobileApp } from "../App";
 import { AdminApp } from "../../../admin/src/App";
-import { AdsSection } from "../../../admin/src/components/OperationalSections";
+import { AdsSection, PaymentsSection } from "../../../admin/src/components/OperationalSections";
 
 const SAMPLE_PRODUCT: Product = {
   id: "prod_1",
@@ -114,12 +116,113 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
       <BottomNav activeView="home" onSelectNav={() => {}} cartCount={4} />
     );
     assertCleanUiMarkup(navHtml);
+    expect(navHtml).toContain("Início");
+    expect(navHtml).toContain("Categorias");
+    expect(navHtml).toContain("Publicar");
     expect(navHtml).toContain("Carrinho");
+    expect(navHtml).toContain("Conta");
+    expect(navHtml).not.toContain("Pesquisa");
     expect(navHtml).toContain(">4<");
     expect(navHtml).not.toContain("-top-5");
+    expect(navHtml).not.toContain("-mt-");
+    expect(navHtml).toContain("pb-safe");
+
+    const emptyStripHtml = renderToStaticMarkup(
+      <BottomAdStrip ad={null} onOpen={() => {}} onDismiss={() => {}} />
+    );
+    expect(emptyStripHtml).toBe("");
+
+    const activeStripHtml = renderToStaticMarkup(
+      <BottomAdStrip
+        ad={{
+          id: "ad_strip_1",
+          sellerId: "u1",
+          storeId: "st_1",
+          storeName: "Loja Central",
+          title: "Promoção Especial no Uíge",
+          imageUrl: "",
+          position: "faixa",
+          startDate: "2026-01-01T00:00:00Z",
+          endDate: "2027-01-01T00:00:00Z",
+          views: 0,
+          clicks: 0,
+          active: true,
+          status: "aprovado",
+          createdAt: "2026-01-01T00:00:00Z",
+        }}
+        onOpen={() => {}}
+        onDismiss={() => {}}
+      />
+    );
+    assertCleanUiMarkup(activeStripHtml);
+    expect(activeStripHtml).toContain("Patrocinado");
+    expect(activeStripHtml).toContain("Fechar faixa patrocinada");
+    expect(activeStripHtml).toContain("Promoção Especial no Uíge");
 
     const statusHtml = renderToStaticMarkup(<OnlineStatusIndicator />);
     assertCleanUiMarkup(statusHtml);
+  });
+
+  it("barra inferior + faixa não cobrem botões no telemóvel (360px) e Quero vender respeita estado do cliente", () => {
+    const mobileHtml = renderToStaticMarkup(<MobileApp initialBooted={true} />);
+    assertCleanUiMarkup(mobileHtml);
+    // O MobileApp reserva margem inferior suficiente (>5rem) e não injeta nenhum botão flutuante sobre os cartões
+    expect(mobileHtml).toContain("pb-[calc(5.25rem+env(safe-area-inset-bottom,0px))]");
+    expect(mobileHtml).toContain('data-testid="mobile-bottom-dock"');
+    expect(mobileHtml).toContain('data-testid="mobile-bottom-nav"');
+    expect(mobileHtml).not.toContain('aria-label="Publicar artigo"');
+
+    // Quando há faixa de anúncio activa e barra inferior juntas num dock, a faixa vem ANTES da barra
+    const dockOrderHtml = renderToStaticMarkup(
+      <div className="flex flex-col">
+        <BottomAdStrip
+          ad={{
+            id: "ad_strip_2",
+            sellerId: "u1",
+            title: "Banner Fino",
+            imageUrl: "",
+            position: "faixa",
+            startDate: "2026-01-01T00:00:00Z",
+            endDate: "2027-01-01T00:00:00Z",
+            views: 0,
+            clicks: 0,
+            active: true,
+            status: "aprovado",
+            createdAt: "2026-01-01T00:00:00Z",
+          }}
+          onOpen={() => {}}
+          onDismiss={() => {}}
+        />
+        <BottomNav activeView="home" onSelectNav={() => {}} cartCount={0} embedded={true} />
+      </div>
+    );
+    expect(dockOrderHtml.indexOf('data-testid="bottom-ad-strip"')).toBeLessThan(
+      dockOrderHtml.indexOf('data-testid="mobile-bottom-nav"')
+    );
+    expect(dockOrderHtml).not.toContain("fixed bottom-0");
+
+    const wantToSellHtml = renderToStaticMarkup(
+      <WantToSellModal
+        isOpen={true}
+        onClose={() => {}}
+        user={{
+          id: "cli_1",
+          name: "João Baptista",
+          email: "joao@uige.ao",
+          role: "cliente",
+          walletBalance: 0,
+          createdAt: "2026-01-01T00:00:00Z",
+        }}
+        myStore={null}
+        categories={DEFAULT_CATEGORIES}
+        onSubmitted={async () => {}}
+        onGoToSeller={() => {}}
+        showToast={() => {}}
+      />
+    );
+    assertCleanUiMarkup(wantToSellHtml);
+    expect(wantToSellHtml).toContain("Quero Vender no Uíge");
+    expect(wantToSellHtml).toContain("Enviar Pedido para Aprovação");
   });
 
   it("renderiza ProductCard com selo Usado, tipo de loja, código e preço em Kz", () => {
@@ -318,7 +421,7 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
     );
     assertCleanUiMarkup(publishHtml);
     expect(publishHtml).toContain("Publicar Novo Artigo");
-    expect(publishHtml).toContain("Vídeo (≤ 15s / 5MB)");
+    expect(publishHtml).toContain("Vídeo (≤ 15s / 10MB)");
     expect(publishHtml).toContain("aguarda aprovação");
   });
 
@@ -330,7 +433,7 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
       storeName: "Super Uíge",
       title: "Campanha em Vídeo",
       subtitle: "Entregas rápidas hoje",
-      imageUrl: "",
+      imageUrl: "https://cdn.example.com/poster.jpg",
       videoUrl: "https://cdn.example.com/ad.mp4",
       mediaType: "video" as const,
       position: "topo" as const,
@@ -347,6 +450,20 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
     assertCleanUiMarkup(inlineMediaHtml);
     expect(inlineMediaHtml).toContain("<video");
     expect(inlineMediaHtml).toContain("muted");
+
+    const origDescriptor = Object.getOwnPropertyDescriptor(globalThis.navigator, "connection");
+    Object.defineProperty(globalThis.navigator, "connection", {
+      configurable: true,
+      value: { type: "cellular" },
+    });
+    const cellularMediaHtml = renderToStaticMarkup(<SponsoredMediaView ad={sampleAd} />);
+    if (origDescriptor) {
+      Object.defineProperty(globalThis.navigator, "connection", origDescriptor);
+    } else {
+      delete (globalThis.navigator as any).connection;
+    }
+    expect(cellularMediaHtml).not.toContain("<video");
+    expect(cellularMediaHtml).toContain("Reproduzir");
 
     const fullscreenHtml = renderToStaticMarkup(
       <FullscreenAdOverlay ad={sampleAd} store={null} onClose={() => {}} onOpenStore={() => {}} />
@@ -397,13 +514,58 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
             createdAt: "2026-01-01T00:00:00Z",
           },
         ]}
+        defaultAdvertiserType="loja"
         onCreateAd={async () => {}}
+        onUpdateAd={async () => {}}
         onToggleAd={() => {}}
         onDeleteAd={() => {}}
       />
     );
     assertCleanUiMarkup(adsAdminHtml);
+    expect(adsAdminHtml).toContain("Plataforma (Mercado Uíge)");
+    expect(adsAdminHtml).toContain("Externo (Cliente sem loja)");
+    expect(adsAdminHtml).toContain("Faixa acima da barra");
+    expect(adsAdminHtml).toContain("Ecrã inteiro");
+    expect(adsAdminHtml).toContain('data-testid="admin-ad-preview"');
+    expect(adsAdminHtml).toContain("Editar");
     expect(adsAdminHtml).toContain("Loja Paga VIP");
     expect(adsAdminHtml).not.toContain("Loja Grátis Oculta");
+
+    const emptyAdsHtml = renderToStaticMarkup(
+      <AdsSection
+        ads={[]}
+        stores={[]}
+        onCreateAd={async () => {}}
+        onToggleAd={() => {}}
+        onDeleteAd={() => {}}
+      />
+    );
+    assertCleanUiMarkup(emptyAdsHtml);
+    expect(emptyAdsHtml).toContain("Criar o primeiro anúncio");
+
+    const paymentsHtml = renderToStaticMarkup(
+      <PaymentsSection
+        payments={[
+          {
+            id: "pay_ext_1",
+            sellerId: "admin_1",
+            advertiserName: "Farmácia Central Uíge",
+            type: "anuncio_externo",
+            amountKz: 25000,
+            method: "Transferência",
+            proofUrl: "https://cdn.example.com/comprovativo.jpg",
+            status: "pendente",
+            createdAt: "2026-02-01T10:00:00Z",
+          },
+        ]}
+        onPreviewImage={() => {}}
+        onConfirmPayment={() => {}}
+        onRejectPayment={() => {}}
+      />
+    );
+    assertCleanUiMarkup(paymentsHtml);
+    expect(paymentsHtml).toContain("Farmácia Central Uíge");
+    expect(paymentsHtml).toContain("Anúncio Externo");
+    expect(paymentsHtml).toContain("Ver Comprovativo");
   });
 });

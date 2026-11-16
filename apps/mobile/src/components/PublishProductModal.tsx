@@ -16,6 +16,8 @@ import {
   SystemConfig,
   User,
   UIGE_MUNICIPALITIES,
+  MAX_PRODUCT_VIDEO_BYTES,
+  MAX_VIDEO_DURATION_SEC,
   compressImage,
   compressVideoOnDevice,
   productRepo,
@@ -128,7 +130,11 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
     setErrorMsg("");
     setProcessingMedia(true);
     try {
-      const compressed = await compressVideoOnDevice(file);
+      const compressed = await compressVideoOnDevice(file, {
+        maxDurationSec: MAX_VIDEO_DURATION_SEC,
+        maxBytes: MAX_PRODUCT_VIDEO_BYTES,
+        targetBytes: 8 * 1024 * 1024,
+      });
       setVideoState({
         blob: compressed.blob,
         previewUrl: compressed.previewUrl,
@@ -142,7 +148,7 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
       setErrorMsg(
         err instanceof Error
           ? err.message
-          : "O vídeo deve ter até 15 segundos e no máximo 5 MB."
+          : "O vídeo deve ter até 15 segundos e no máximo 10 MB."
       );
     } finally {
       setProcessingMedia(false);
@@ -169,7 +175,7 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
       return;
     }
     if (mediaKind === "video" && !videoState) {
-      setErrorMsg("Carrega um vídeo até 15 s e 5 MB (ou troca para Fotos).");
+      setErrorMsg("Carrega um vídeo até 15 s e 10 MB (ou troca para Fotos).");
       return;
     }
 
@@ -341,7 +347,7 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
                   }`}
                 >
                   <Video size={15} />
-                  <span>Vídeo (≤ 15s / 5MB)</span>
+                  <span>Vídeo (≤ 15s / 10MB)</span>
                 </button>
               </div>
 
@@ -399,10 +405,10 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
                     <Video size={16} className="text-[#B7F34A]" />
                     <span className="font-bold">
                       {processingMedia
-                        ? "A comprimir e validar vídeo (≤ 15s, 5MB)..."
+                        ? "A comprimir e validar vídeo (≤ 15s, 10MB)..."
                         : videoState
                         ? `Vídeo pronto (${videoState.durationSec}s · ${videoState.sizeMB} MB) — Trocar`
-                        : "Escolher vídeo curto (máx. 15s e 5 MB)"}
+                        : "Escolher vídeo curto (máx. 15s e 10 MB)"}
                     </span>
                     <input
                       type="file"

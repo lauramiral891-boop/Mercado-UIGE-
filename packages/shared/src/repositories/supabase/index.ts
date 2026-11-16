@@ -8,7 +8,11 @@ import {
   getStoredStores,
 } from "../../lib/storage";
 import { smartSearch, generateDeliveryCode } from "../../lib/utils";
-import { isAdEligibleForPaidStore } from "../../lib/adDelivery";
+import {
+  isAdEligibleForPublicDisplay,
+  resolveAdAdvertiserType,
+  validateSafeAdDestination,
+} from "../../lib/adDelivery";
 import {
   Product,
   Store,
@@ -641,6 +645,29 @@ export class SupabaseUserRepo implements IUserRepo {
     await fallbackUserRepo.setRole(id, role);
   }
 
+  async requestMerchantUpgrade(
+    id: string,
+    data?: { phone?: string; municipality?: string; bairro?: string }
+  ): Promise<User> {
+    if (isSupabaseConfigured) {
+      try {
+        const { error } = await supabase.rpc("request_merchant_upgrade", {
+          p_telefone: data?.phone || null,
+          p_municipio: data?.municipality || null,
+          p_bairro: data?.bairro || null,
+        });
+        if (error && error.code !== "42883" && error.code !== "PGRST202") {
+          throw error;
+        }
+      } catch (err: any) {
+        if (err?.code && err.code !== "42883" && err.code !== "PGRST202") {
+          throw err;
+        }
+      }
+    }
+    return fallbackUserRepo.requestMerchantUpgrade(id, data);
+  }
+
   async setPlan(id: string, planType: PlanType, durationDays = 30): Promise<void> {
     const expiresAt = planType === "gratis" ? null : new Date(Date.now() + durationDays * 86400000).toISOString();
     if (isSupabaseConfigured) {
@@ -1058,11 +1085,24 @@ export class SupabaseAdRepo implements IAdRepo {
         ? "video"
         : "imagem";
 
+    const advertiserType =
+      a.tipo_anunciante === "plataforma" ||
+      a.tipo_anunciante === "externo" ||
+      a.tipo_anunciante === "loja"
+        ? a.tipo_anunciante
+        : a.loja_id
+        ? "loja"
+        : "plataforma";
+
     return {
       id: a.id,
-      storeId: a.loja_id,
+      advertiserType,
+      advertiserName:
+        a.nome_anunciante ||
+        (advertiserType === "plataforma" ? "Mercado Uíge" : a.lojas?.nome || undefined),
+      storeId: a.loja_id || undefined,
       sellerId: a.vendedor_id,
-      productId: a.produto_id,
+      productId: a.produto_id || undefined,
       storeName: a.lojas?.nome || undefined,
       storePlanType: a.lojas?.plano_tipo || undefined,
       storePlanExpiresAt: a.lojas?.plano_expira_em ?? null,
@@ -1070,6 +1110,9 @@ export class SupabaseAdRepo implements IAdRepo {
       storeIsSuspended: a.lojas?.suspensa ?? undefined,
       storeImage: a.lojas?.foto_fachada_url || a.lojas?.logo_url || undefined,
       productName: a.produtos?.nome || undefined,
+      destinationType:
+        a.tipo_destino || (a.produto_id ? "produto" : "loja"),
+      destinationValue: a.destino_valor || undefined,
       title: a.titulo,
       subtitle: a.subtitulo || "",
       imageUrl: a.imagem_url || a.lojas?.foto_fachada_url || a.lojas?.logo_url || "",
@@ -1083,6 +1126,27 @@ export class SupabaseAdRepo implements IAdRepo {
       active: Boolean(a.ativo),
       status: a.estado || "pendente",
       createdAt: a.criado_em,
+    };
+  }
+
+  private validateAndBuildDestination(ad: Partial<SponsoredAd>) {
+    const destinationType = ad.destinationType || (ad.productId ? "produto" : "loja");
+    if (destinationType === "link" || destinationType === "whatsapp") {
+      const check = validateSafeAdDestination(destinationType, ad.destinationValue, {
+        storeId: ad.storeId,
+        productId: ad.productId,
+      });
+      if (!check.ok) {
+        throw new Error(check.error || "Destino de anúncio inválido.");
+      }
+      return { destinationType, destinationValue: check.normalizedValue };
+    }
+    return {
+      destinationType,
+      destinationValue:
+        destinationType === "produto"
+          ? ad.productId || ad.destinationValue || null
+          : ad.storeId || ad.destinationValue || null,
     };
   }
 
@@ -1105,7 +1169,7 @@ export class SupabaseAdRepo implements IAdRepo {
           a.status === "aprovado" &&
           new Date(a.startDate).getTime() <= now &&
           new Date(a.endDate).getTime() >= now &&
-          isAdEligibleForPaidStore(a, cachedStores, now)
+          isAdEligibleForPublicDisplay(a, cachedStores, now)
       );
     } catch {
       return fallbackAdRepo.getAll(includeAll);
@@ -1120,15 +1184,21 @@ export class SupabaseAdRepo implements IAdRepo {
   async create(ad: Partial<SponsoredAd>): Promise<SponsoredAd> {
     if (!isSupabaseConfigured) return fallbackAdRepo.create(ad);
 
+    const advertiserType = resolveAdAdvertiserType(ad);
+    if (advertiserType === "externo" && !(ad.advertiserName || "").trim()) {
+      throw new Error("Indica o nome do anunciante externo.");
+    }
+    const { destinationType, destinationValue } = this.validateAndBuildDestination(ad);
+
     const mediaType: "imagem" | "video" =
       ad.mediaType === "video" || (Boolean(ad.videoUrl) && ad.mediaType !== "imagem")
         ? "video"
         : "imagem";
 
     const basePayload = {
-      loja_id: ad.storeId || null,
-      vendedor_id: ad.sellerId,
-      produto_id: ad.productId || null,
+      loja_id: advertiserType === "loja" ? ad.storeId || null : null,
+      vendedor_id: ad.sellerId || null,
+      produto_id: destinationType === "produto" ? ad.productId || destinationValue || null : ad.productId || null,
       titulo: ad.title || "Campanha Patrocinada",
       subtitulo: ad.subtitle || "",
       imagem_url: ad.imageUrl || null,
@@ -1146,15 +1216,28 @@ export class SupabaseAdRepo implements IAdRepo {
           ...basePayload,
           video_url: ad.videoUrl || null,
           tipo_media: mediaType,
+          tipo_anunciante: advertiserType,
+          nome_anunciante:
+            advertiserType === "plataforma"
+              ? ad.advertiserName?.trim() || "Mercado Uíge"
+              : advertiserType === "externo"
+              ? ad.advertiserName?.trim() || null
+              : null,
+          tipo_destino: destinationType,
+          destino_valor: destinationValue || null,
         })
         .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
         .single();
 
-      // Compatibilidade se a migração 20250106 ainda não tiver sido aplicada no SQL Editor
+      // Compatibilidade se colunas novas ainda não estiverem aplicadas no SQL Editor
       if (result.error && (result.error.code === "42703" || result.error.code === "PGRST204")) {
         result = await supabase
           .from("anuncios")
-          .insert(basePayload)
+          .insert({
+            ...basePayload,
+            video_url: ad.videoUrl || null,
+            tipo_media: mediaType,
+          })
           .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
           .single();
       }
@@ -1166,10 +1249,99 @@ export class SupabaseAdRepo implements IAdRepo {
         return fallbackAdRepo.create(ad);
       }
       if (!result.data) return fallbackAdRepo.create(ad);
-      return this.mapAdRow(result.data);
+      const mapped = this.mapAdRow(result.data);
+      // Preserva metadados locais quando colunas opcionais não existem no servidor
+      return {
+        ...mapped,
+        advertiserType,
+        advertiserName: ad.advertiserName || mapped.advertiserName,
+        destinationType,
+        destinationValue: destinationValue || mapped.destinationValue,
+      };
     } catch (err: any) {
-      if (err?.message?.toLowerCase().includes("plano")) throw err;
+      if (err?.message?.toLowerCase().includes("plano") || err?.message?.toLowerCase().includes("https")) {
+        throw err;
+      }
       return fallbackAdRepo.create(ad);
+    }
+  }
+
+  async update(id: string, updates: Partial<SponsoredAd>): Promise<SponsoredAd> {
+    const localUpdated = await fallbackAdRepo.update(id, updates);
+    if (!isSupabaseConfigured) return localUpdated;
+
+    const advertiserType = resolveAdAdvertiserType(localUpdated);
+    const { destinationType, destinationValue } = this.validateAndBuildDestination(localUpdated);
+    const mediaType: "imagem" | "video" =
+      localUpdated.mediaType === "video" ||
+      (Boolean(localUpdated.videoUrl) && localUpdated.mediaType !== "imagem")
+        ? "video"
+        : "imagem";
+
+    try {
+      let result = await supabase
+        .from("anuncios")
+        .update({
+          loja_id: advertiserType === "loja" ? localUpdated.storeId || null : null,
+          produto_id:
+            destinationType === "produto"
+              ? localUpdated.productId || destinationValue || null
+              : localUpdated.productId || null,
+          titulo: localUpdated.title,
+          subtitulo: localUpdated.subtitle || "",
+          imagem_url: localUpdated.imageUrl || null,
+          video_url: localUpdated.videoUrl || null,
+          tipo_media: mediaType,
+          tipo_anunciante: advertiserType,
+          nome_anunciante:
+            advertiserType === "plataforma"
+              ? localUpdated.advertiserName || "Mercado Uíge"
+              : advertiserType === "externo"
+              ? localUpdated.advertiserName || null
+              : null,
+          tipo_destino: destinationType,
+          destino_valor: destinationValue || null,
+          posicao: localUpdated.position,
+          data_inicio: localUpdated.startDate,
+          data_fim: localUpdated.endDate,
+          ativo: Boolean(localUpdated.active),
+          estado: localUpdated.status,
+        })
+        .eq("id", id)
+        .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
+        .single();
+
+      if (result.error && (result.error.code === "42703" || result.error.code === "PGRST204")) {
+        result = await supabase
+          .from("anuncios")
+          .update({
+            loja_id: advertiserType === "loja" ? localUpdated.storeId || null : null,
+            titulo: localUpdated.title,
+            subtitulo: localUpdated.subtitle || "",
+            imagem_url: localUpdated.imageUrl || null,
+            posicao: localUpdated.position,
+            data_inicio: localUpdated.startDate,
+            data_fim: localUpdated.endDate,
+            ativo: Boolean(localUpdated.active),
+            estado: localUpdated.status,
+          })
+          .eq("id", id)
+          .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
+          .single();
+      }
+
+      if (result.error) {
+        if (result.error.code === "P0001" || result.error.message?.toLowerCase().includes("plano")) {
+          throw new Error(result.error.message);
+        }
+        return localUpdated;
+      }
+      return result.data ? this.mapAdRow(result.data) : localUpdated;
+    } catch (err: any) {
+      if (err?.message?.toLowerCase().includes("plano") || err?.message?.toLowerCase().includes("https")) {
+        throw err;
+      }
+      return localUpdated;
     }
   }
 
@@ -1214,6 +1386,7 @@ export class SupabasePaymentRepo implements IPaymentRepo {
       id: p.id,
       sellerId: p.vendedor_id,
       sellerName: p.perfis?.nome || undefined,
+      advertiserName: p.nome_anunciante || undefined,
       storeId: p.loja_id,
       storeName: p.lojas?.nome || undefined,
       userRoleType: p.perfil_tipo || undefined,
@@ -1249,25 +1422,47 @@ export class SupabasePaymentRepo implements IPaymentRepo {
   async create(payment: Partial<MerchantPayment>): Promise<MerchantPayment> {
     if (!isSupabaseConfigured) return fallbackPaymentRepo.create(payment);
     try {
-      const { data, error } = await supabase
+      let result = await supabase
         .from("pagamentos_comerciante")
         .insert({
           vendedor_id: payment.sellerId,
           loja_id: payment.storeId || null,
           perfil_tipo: payment.userRoleType || "loja_fixa",
           tipo: payment.type || "plano",
+          nome_anunciante: payment.advertiserName || null,
           plano_alvo: payment.targetPlan || null,
           anuncio_id: payment.adId || null,
           valor_kz: Number(payment.amountKz || 0),
           metodo: payment.method || "Multicaixa Express",
           referencia: payment.reference || null,
           comprovativo_url: payment.proofUrl || "",
-          estado: "pendente",
+          estado: payment.status || "pendente",
         })
         .select("*, perfis(nome), lojas(nome)")
         .single();
-      if (error || !data) return fallbackPaymentRepo.create(payment);
-      return this.mapRow(data);
+
+      if (result.error && (result.error.code === "42703" || result.error.code === "PGRST204")) {
+        result = await supabase
+          .from("pagamentos_comerciante")
+          .insert({
+            vendedor_id: payment.sellerId,
+            loja_id: payment.storeId || null,
+            perfil_tipo: payment.userRoleType || "loja_fixa",
+            tipo: payment.type === "anuncio_externo" ? "anuncio" : payment.type || "plano",
+            plano_alvo: payment.targetPlan || null,
+            anuncio_id: payment.adId || null,
+            valor_kz: Number(payment.amountKz || 0),
+            metodo: payment.method || "Multicaixa Express",
+            referencia: payment.reference || null,
+            comprovativo_url: payment.proofUrl || "",
+            estado: payment.status || "pendente",
+          })
+          .select("*, perfis(nome), lojas(nome)")
+          .single();
+      }
+
+      if (result.error || !result.data) return fallbackPaymentRepo.create(payment);
+      return this.mapRow(result.data);
     } catch {
       return fallbackPaymentRepo.create(payment);
     }

@@ -1,10 +1,23 @@
 import { Store, User } from "../types";
 
 export const MAX_VIDEO_DURATION_SEC = 15;
-export const MAX_VIDEO_BYTES = 5 * 1024 * 1024; // 5 MB
+export const MAX_PRODUCT_VIDEO_BYTES = 10 * 1024 * 1024; // 10 MB (artigos de comerciantes)
+export const MAX_VIDEO_BYTES = MAX_PRODUCT_VIDEO_BYTES; // Alias para artigos (10 MB)
+
+export const MAX_AD_VIDEO_DURATION_SEC = 30;
+export const MAX_AD_VIDEO_BYTES = 20 * 1024 * 1024; // 20 MB (anúncios do admin)
+export const AD_VIDEO_TARGET_BYTES = 8 * 1024 * 1024; // Alvo ~8 MB após compressão no dispositivo
+
+export type PublishActionTarget = "publish" | "want_to_sell" | "login";
+
+export interface VideoConstraintOptions {
+  maxDurationSec?: number;
+  maxBytes?: number;
+  targetBytes?: number;
+}
 
 /**
- * Garante que apenas comerciantes aprovados (e não suspensos) vêem o botão flutuante "+ Publicar".
+ * Garante que apenas comerciantes aprovados (e não suspensos) abrem directamente a publicação de artigos.
  */
 export function canMerchantPublishFloating(user: User | null, store?: Store | null): boolean {
   if (!user || user.role !== "comerciante") return false;
@@ -14,28 +27,47 @@ export function canMerchantPublishFloating(user: User | null, store?: Store | nu
 }
 
 /**
- * Valida regras estritas de duração (<= 15s) e tamanho (<= 5 MB) para vídeos de artigos e anúncios.
+ * Resolve o destino do botão Publicar na barra inferior:
+ * - Visitante sem conta -> login
+ * - Comerciante aprovado -> publish
+ * - Cliente normal ou comerciante ainda em aprovação -> want_to_sell ("Quero vender")
+ */
+export function resolvePublishAction(user: User | null, store?: Store | null): PublishActionTarget {
+  if (!user) return "login";
+  if (canMerchantPublishFloating(user, store)) return "publish";
+  return "want_to_sell";
+}
+
+/**
+ * Valida regras estritas de duração e tamanho:
+ * - Artigos de comerciantes: até 15 s e 10 MB
+ * - Anúncios do admin: até 30 s e 20 MB (comprimidos no dispositivo para ~8 MB)
  */
 export function validateVideoConstraints(
   durationSec: number,
-  sizeBytes: number
+  sizeBytes: number,
+  opts?: VideoConstraintOptions
 ): { ok: boolean; error?: string } {
+  const maxDurationSec = opts?.maxDurationSec ?? MAX_VIDEO_DURATION_SEC;
+  const maxBytes = opts?.maxBytes ?? MAX_PRODUCT_VIDEO_BYTES;
+  const maxMbLabel = Math.round(maxBytes / (1024 * 1024));
+
   if (!Number.isFinite(durationSec) || durationSec <= 0) {
     return { ok: false, error: "Não foi possível ler a duração do vídeo." };
   }
-  if (durationSec > MAX_VIDEO_DURATION_SEC) {
+  if (durationSec > maxDurationSec) {
     return {
       ok: false,
-      error: `O vídeo tem ${Math.ceil(durationSec)}s. O limite máximo é ${MAX_VIDEO_DURATION_SEC} segundos.`,
+      error: `O vídeo tem ${Math.ceil(durationSec)}s. O limite máximo é ${maxDurationSec} segundos.`,
     };
   }
   if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
     return { ok: false, error: "Ficheiro de vídeo inválido ou vazio." };
   }
-  if (sizeBytes > MAX_VIDEO_BYTES) {
+  if (sizeBytes > maxBytes) {
     return {
       ok: false,
-      error: "O vídeo comprimido excede 5 MB. Escolhe um vídeo mais curto ou com menor resolução.",
+      error: `O vídeo excede ${maxMbLabel} MB. Escolhe um vídeo mais curto ou com menor resolução.`,
     };
   }
   return { ok: true };
@@ -72,7 +104,18 @@ export async function getVideoDuration(file: File | Blob): Promise<number> {
   });
 }
 
-async function transcodeVideoLowerBitrate(file: File, durationSec: number): Promise<Blob> {
+export function computeTargetVideoBitrate(durationSec: number, targetBytes: number): number {
+  const safeDuration = Math.max(1, durationSec);
+  const rawBps = Math.floor((targetBytes * 8 * 0.85) / safeDuration);
+  return Math.max(450_000, Math.min(2_000_000, rawBps));
+}
+
+async function transcodeVideoLowerBitrate(
+  file: File,
+  durationSec: number,
+  maxDurationSec: number,
+  targetBytes: number
+): Promise<Blob> {
   if (
     typeof document === "undefined" ||
     typeof MediaRecorder === "undefined" ||
@@ -96,7 +139,7 @@ async function transcodeVideoLowerBitrate(file: File, durationSec: number): Prom
     video.onloadeddata = () => {
       const srcW = video.videoWidth || 640;
       const srcH = video.videoHeight || 360;
-      const maxW = 640;
+      const maxW = 720;
       const scale = srcW > maxW ? maxW / srcW : 1;
       const w = Math.max(240, Math.round(srcW * scale));
       const h = Math.max(180, Math.round(srcH * scale));
@@ -118,9 +161,10 @@ async function transcodeVideoLowerBitrate(file: File, durationSec: number): Prom
         ? "video/webm"
         : "";
 
+      const videoBitsPerSecond = computeTargetVideoBitrate(durationSec, targetBytes);
       const recorder = mimeType
-        ? new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 750_000 })
-        : new MediaRecorder(stream, { videoBitsPerSecond: 750_000 });
+        ? new MediaRecorder(stream, { mimeType, videoBitsPerSecond })
+        : new MediaRecorder(stream, { videoBitsPerSecond });
 
       const chunks: BlobPart[] = [];
       recorder.ondataavailable = (ev) => {
@@ -156,7 +200,7 @@ async function transcodeVideoLowerBitrate(file: File, durationSec: number): Prom
         .play()
         .then(() => {
           drawFrame();
-          const maxMs = Math.min(MAX_VIDEO_DURATION_SEC, Math.max(1, durationSec)) * 1000 + 250;
+          const maxMs = Math.min(maxDurationSec, Math.max(1, durationSec)) * 1000 + 250;
           setTimeout(() => {
             cancelAnimationFrame(rafId);
             if (recorder.state !== "inactive") recorder.stop();
@@ -178,29 +222,58 @@ async function transcodeVideoLowerBitrate(file: File, durationSec: number): Prom
 }
 
 /**
- * Valida duração (<= 15s), comprime no telemóvel quando > 5 MB e garante limite final <= 5 MB.
+ * Valida duração e tamanho, e comprime no telemóvel antes do envio quando excede o tamanho-alvo.
  */
-export async function compressVideoOnDevice(file: File): Promise<{
+export async function compressVideoOnDevice(
+  file: File,
+  opts?: VideoConstraintOptions
+): Promise<{
   blob: Blob;
   previewUrl: string;
   durationSec: number;
   sizeMB: number;
 }> {
+  const maxDurationSec = opts?.maxDurationSec ?? MAX_VIDEO_DURATION_SEC;
+  const maxBytes = opts?.maxBytes ?? MAX_PRODUCT_VIDEO_BYTES;
+  const targetBytes = opts?.targetBytes ?? Math.min(maxBytes, AD_VIDEO_TARGET_BYTES);
+  const maxMbLabel = Math.round(maxBytes / (1024 * 1024));
+
   const durationSec = await getVideoDuration(file);
-  if (durationSec > MAX_VIDEO_DURATION_SEC) {
+  if (durationSec > maxDurationSec) {
     throw new Error(
-      `O vídeo tem ${Math.ceil(durationSec)}s. O limite máximo é ${MAX_VIDEO_DURATION_SEC} segundos.`
+      `O vídeo tem ${Math.ceil(durationSec)}s. O limite máximo é ${maxDurationSec} segundos.`
     );
   }
 
   let finalBlob: Blob = file;
-  if (file.size > MAX_VIDEO_BYTES) {
-    finalBlob = await transcodeVideoLowerBitrate(file, durationSec);
+  if (file.size > targetBytes) {
+    try {
+      const compressed = await transcodeVideoLowerBitrate(
+        file,
+        durationSec,
+        maxDurationSec,
+        targetBytes
+      );
+      if (compressed.size > 0 && compressed.size < file.size) {
+        finalBlob = compressed;
+      }
+    } catch (err) {
+      if (file.size > maxBytes) {
+        throw err;
+      }
+      finalBlob = file;
+    }
   }
 
-  const check = validateVideoConstraints(durationSec, finalBlob.size);
+  const check = validateVideoConstraints(durationSec, finalBlob.size, {
+    maxDurationSec,
+    maxBytes,
+  });
   if (!check.ok) {
-    throw new Error(check.error || "O vídeo excede os limites permitidos (15 s e 5 MB).");
+    throw new Error(
+      check.error ||
+        `O vídeo excede os limites permitidos (${maxDurationSec} s e ${maxMbLabel} MB).`
+    );
   }
 
   return {

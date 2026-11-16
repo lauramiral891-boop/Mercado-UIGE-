@@ -4,12 +4,24 @@ import {
   Store,
   FULLSCREEN_AD_INITIAL_DELAY_MS,
   FULLSCREEN_AD_COOLDOWN_MS,
+  MAX_AD_VIDEO_DURATION_SEC,
+  MAX_AD_VIDEO_BYTES,
+  AD_VIDEO_TARGET_BYTES,
+  MAX_PRODUCT_VIDEO_BYTES,
+  MAX_STORAGE_UPLOAD_BYTES,
+  computeTargetVideoBitrate,
+  validateVideoConstraints,
+  uploadMediaFile,
   storeHasActivePaidPlan,
+  isAdEligibleForPublicDisplay,
+  validateSafeAdDestination,
   isCellularConnection,
   canShowFullscreenAd,
   OfflineAdRepo,
+  OfflinePaymentRepo,
   saveStores,
   saveAds,
+  saveMerchantPayments,
 } from "../../index";
 
 const makeStore = (overrides: Partial<Store> = {}): Store => ({
@@ -44,6 +56,7 @@ describe("Anúncios em imagem ou vídeo, dados móveis e regras de ecrã inteiro
       removeItem: (k: string) => store.delete(k),
       clear: () => store.clear(),
     };
+    saveMerchantPayments([]);
   });
 
   it("identifica correctamente lojas elegíveis apenas com plano pago activo", () => {
@@ -109,6 +122,7 @@ describe("Anúncios em imagem ou vídeo, dados móveis e regras de ecrã inteiro
 
     const paidVideoAd: SponsoredAd = {
       id: "ad_paid_video",
+      advertiserType: "loja",
       storeId: "st_paid",
       sellerId: "u_owner",
       storeName: paidStore.name,
@@ -146,6 +160,7 @@ describe("Anúncios em imagem ou vídeo, dados móveis e regras de ecrã inteiro
 
     await expect(
       repo.create({
+        advertiserType: "loja",
         storeId: "st_free",
         sellerId: "u_owner",
         title: "Tentativa sem plano",
@@ -153,5 +168,141 @@ describe("Anúncios em imagem ou vídeo, dados móveis e regras de ecrã inteiro
         status: "aprovado",
       })
     ).rejects.toThrow("plano pago activo");
+  });
+
+  it("permite anúncios da plataforma e externos sem loja, rejeita javascript: e regista pagamentos externos", async () => {
+    saveStores([]);
+    saveAds([]);
+
+    expect(validateSafeAdDestination("link", "https://mercadouige.ao/campanha").ok).toBe(true);
+    expect(validateSafeAdDestination("link", "javascript:alert(1)").ok).toBe(false);
+    expect(validateSafeAdDestination("link", "http://inseguro.ao").ok).toBe(false);
+    expect(validateSafeAdDestination("link", "data:text/html,<script>").ok).toBe(false);
+
+    const waCheck = validateSafeAdDestination("whatsapp", "923456789");
+    expect(waCheck.ok).toBe(true);
+    expect(waCheck.normalizedValue).toBe("https://wa.me/244923456789");
+
+    const adRepo = new OfflineAdRepo();
+    const futureEnd = new Date(Date.now() + 7 * 86400_000).toISOString();
+    const pastStart = new Date(Date.now() - 86400_000).toISOString();
+
+    // Rejeita criação com javascript:
+    await expect(
+      adRepo.create({
+        advertiserType: "plataforma",
+        title: "XSS Bloqueado",
+        destinationType: "link",
+        destinationValue: "javascript:alert(1)",
+        position: "faixa",
+        startDate: pastStart,
+        endDate: futureEnd,
+        active: true,
+        status: "aprovado",
+      })
+    ).rejects.toThrow("https://");
+
+    const platformAd = await adRepo.create({
+      advertiserType: "plataforma",
+      title: "Semana Agrícola do Uíge",
+      destinationType: "link",
+      destinationValue: "https://mercadouige.ao/feira",
+      position: "faixa",
+      startDate: pastStart,
+      endDate: futureEnd,
+      active: true,
+      status: "aprovado",
+    });
+
+    const externalAd = await adRepo.create({
+      advertiserType: "externo",
+      advertiserName: "Banco Sol Uíge",
+      title: "Conta Digital Uíge",
+      destinationType: "whatsapp",
+      destinationValue: "923111222",
+      position: "ecra_inteiro",
+      startDate: pastStart,
+      endDate: futureEnd,
+      active: true,
+      status: "aprovado",
+    });
+
+    expect(isAdEligibleForPublicDisplay(platformAd, [])).toBe(true);
+    expect(isAdEligibleForPublicDisplay(externalAd, [])).toBe(true);
+
+    const activePublic = await adRepo.getAll(false);
+    expect(activePublic).toHaveLength(2);
+
+    // Editar título e destino
+    const updatedExternal = await adRepo.update(externalAd.id, {
+      title: "Conta Jovem Uíge",
+      position: "faixa",
+    });
+    expect(updatedExternal.title).toBe("Conta Jovem Uíge");
+    expect(updatedExternal.position).toBe("faixa");
+
+    // Pausar e apagar
+    await adRepo.updateStatus(platformAd.id, "pendente", false);
+    expect(await adRepo.getAll(false)).toHaveLength(1);
+    await adRepo.delete(platformAd.id);
+    expect(await adRepo.getAll(true)).toHaveLength(1);
+
+    // Registo de pagamento de anunciante externo
+    const payRepo = new OfflinePaymentRepo();
+    const extPayment = await payRepo.create({
+      sellerId: "admin_1",
+      advertiserName: "Banco Sol Uíge",
+      type: "anuncio_externo",
+      adId: externalAd.id,
+      amountKz: 35000,
+      method: "Transferência",
+      reference: "BFA-9921",
+      proofUrl: "https://cdn.example.com/comprovativo.jpg",
+    });
+    expect(extPayment.type).toBe("anuncio_externo");
+    expect(extPayment.amountKz).toBe(35000);
+    expect(extPayment.advertiserName).toBe("Banco Sol Uíge");
+  });
+
+  it("valida limites de vídeo (20 MB / 30 s para anúncios com alvo ~8 MB; 10 MB / 15 s para artigos) e limite de 20 MB no Storage", async () => {
+    expect(MAX_PRODUCT_VIDEO_BYTES).toBe(10 * 1024 * 1024);
+    expect(MAX_AD_VIDEO_BYTES).toBe(20 * 1024 * 1024);
+    expect(AD_VIDEO_TARGET_BYTES).toBe(8 * 1024 * 1024);
+    expect(MAX_AD_VIDEO_DURATION_SEC).toBe(30);
+    expect(MAX_STORAGE_UPLOAD_BYTES).toBe(20 * 1024 * 1024);
+
+    // Anúncio do admin: aceita até 30 s e 20 MB
+    expect(
+      validateVideoConstraints(30, 20 * 1024 * 1024, {
+        maxDurationSec: MAX_AD_VIDEO_DURATION_SEC,
+        maxBytes: MAX_AD_VIDEO_BYTES,
+      })
+    ).toEqual({ ok: true });
+
+    const adTooLong = validateVideoConstraints(31, 5 * 1024 * 1024, {
+      maxDurationSec: MAX_AD_VIDEO_DURATION_SEC,
+      maxBytes: MAX_AD_VIDEO_BYTES,
+    });
+    expect(adTooLong.ok).toBe(false);
+    expect(adTooLong.error).toContain("30 segundos");
+
+    const adTooHeavy = validateVideoConstraints(25, MAX_AD_VIDEO_BYTES + 1, {
+      maxDurationSec: MAX_AD_VIDEO_DURATION_SEC,
+      maxBytes: MAX_AD_VIDEO_BYTES,
+    });
+    expect(adTooHeavy.ok).toBe(false);
+    expect(adTooHeavy.error).toContain("20 MB");
+
+    // Bitrate alvo mantém vídeo de 30s abaixo de ~8 MB
+    const bps30 = computeTargetVideoBitrate(30, AD_VIDEO_TARGET_BYTES);
+    const estimatedBytes30 = (bps30 * 30) / 8;
+    expect(estimatedBytes30).toBeLessThanOrEqual(AD_VIDEO_TARGET_BYTES);
+
+    // Upload para Storage bloqueia ficheiros > 20 MB antes de enviar
+    const oversizedBlob = new Blob([new Uint8Array(10)], { type: "video/mp4" });
+    Object.defineProperty(oversizedBlob, "size", { value: MAX_STORAGE_UPLOAD_BYTES + 1024 });
+    const uploadRes = await uploadMediaFile(oversizedBlob, "grande.mp4", "anuncios");
+    expect(uploadRes.url).toBeNull();
+    expect(uploadRes.error?.message).toContain("20 MB");
   });
 });

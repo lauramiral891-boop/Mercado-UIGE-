@@ -1,10 +1,11 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import {
   Crown,
   Eye,
   Film,
   Image as ImageIcon,
   MousePointerClick,
+  Pencil,
   Plus,
   Store as StoreIcon,
   Truck,
@@ -12,11 +13,17 @@ import {
   Upload,
 } from "lucide-react";
 import {
+  AD_VIDEO_TARGET_BYTES,
+  AdAdvertiserType,
+  AdDestinationType,
   AdPosition,
   AuditLogItem,
   CourierMonthlyFee,
   DeliveryRecord,
+  MAX_AD_VIDEO_BYTES,
+  MAX_AD_VIDEO_DURATION_SEC,
   MerchantPayment,
+  Product,
   ReportItem,
   SponsoredAd,
   Store,
@@ -32,9 +39,11 @@ import {
   isFinanceRole,
   isModeratorRole,
   isSupabaseConfigured,
+  resolveAdAdvertiserType,
   storeHasActivePaidPlan,
   translateErrorMessage,
   uploadMediaFile,
+  validateSafeAdDestination,
 } from "@mercado-uige/shared";
 import { PaginationBar, TableToolbar } from "./TableControls";
 import { downloadCsv } from "../lib/adminHelpers";
@@ -614,6 +623,7 @@ export const PaymentsSection: React.FC<{
       if (q) {
         return (
           (p.storeName || "").toLowerCase().includes(q) ||
+          (p.advertiserName || "").toLowerCase().includes(q) ||
           (p.sellerName || "").toLowerCase().includes(q) ||
           (p.reference || "").toLowerCase().includes(q)
         );
@@ -627,10 +637,10 @@ export const PaymentsSection: React.FC<{
   const handleExport = () => {
     downloadCsv(
       "pagamentos-planos-mercado-uige",
-      ["Loja/Utilizador", "Perfil", "Tipo", "Plano", "Valor (Kz)", "Método", "Referência", "Estado", "Data"],
+      ["Loja/Anunciante", "Perfil", "Tipo", "Plano", "Valor (Kz)", "Método", "Referência", "Estado", "Data"],
       filtered.map((p) => [
-        p.storeName || p.sellerName || "Utilizador",
-        p.userRoleType || "",
+        p.advertiserName || p.storeName || p.sellerName || "Utilizador",
+        p.userRoleType || (p.type === "anuncio_externo" ? "Anunciante externo" : ""),
         p.type,
         p.targetPlan || "",
         p.amountKz,
@@ -642,17 +652,23 @@ export const PaymentsSection: React.FC<{
     );
   };
 
+  const formatPaymentTypeBadge = (pay: MerchantPayment) => {
+    if (pay.type === "plano") return `Plano ${formatPlanType(pay.targetPlan)}`;
+    if (pay.type === "anuncio_externo") return "Anúncio Externo";
+    return "Anúncio de Loja";
+  };
+
   return (
     <div className="space-y-4 anim-fadeUp">
       <TableToolbar
         title="Pagamentos de Planos e Anúncios"
-        subtitle="Confirma ou rejeita comprovativos Multicaixa Express / Transferência com activação automática."
+        subtitle="Confirma ou rejeita comprovativos Multicaixa Express, Transferência e anúncios de anunciantes externos."
         search={search}
         onSearchChange={(v) => {
           setSearch(v);
           setPage(1);
         }}
-        searchPlaceholder="Pesquisar por loja, nome ou referência de pagamento..."
+        searchPlaceholder="Pesquisar por loja, anunciante, nome ou referência..."
         filterValue={statusFilter}
         onFilterChange={(v) => {
           setStatusFilter(v);
@@ -672,7 +688,8 @@ export const PaymentsSection: React.FC<{
         secondFilterOptions={[
           { value: "todos", label: "Planos e Anúncios" },
           { value: "plano", label: "Planos" },
-          { value: "anuncio", label: "Anúncios" },
+          { value: "anuncio", label: "Anúncios de Lojas" },
+          { value: "anuncio_externo", label: "Anúncios Externos" },
         ]}
         onExportCsv={handleExport}
         totalFiltered={filtered.length}
@@ -689,7 +706,7 @@ export const PaymentsSection: React.FC<{
               <table className="w-full text-left text-xs">
                 <thead className="bg-[#111D30] text-[#A6B2C5] uppercase font-bold">
                   <tr>
-                    <th className="p-3.5">Comerciante / Loja</th>
+                    <th className="p-3.5">Comerciante / Anunciante</th>
                     <th className="p-3.5">Tipo / Plano</th>
                     <th className="p-3.5">Valor</th>
                     <th className="p-3.5">Método / Data</th>
@@ -701,16 +718,22 @@ export const PaymentsSection: React.FC<{
                   {paged.map((pay) => (
                     <tr key={pay.id} className="hover:bg-[#111D30]/40">
                       <td className="p-3.5">
-                        <span className="font-bold text-white block">{pay.storeName || pay.sellerName || "Utilizador"}</span>
-                        {pay.userRoleType && (
-                          <span className="text-[11px] text-[#A6B2C5]">
-                            {pay.userRoleType === "entregador" ? "Entregador" : formatStoreType(pay.userRoleType)}
-                          </span>
+                        <span className="font-bold text-white block">
+                          {pay.advertiserName || pay.storeName || pay.sellerName || "Utilizador"}
+                        </span>
+                        {pay.type === "anuncio_externo" ? (
+                          <span className="text-[11px] text-[#B7F34A]">Anunciante externo</span>
+                        ) : (
+                          pay.userRoleType && (
+                            <span className="text-[11px] text-[#A6B2C5]">
+                              {pay.userRoleType === "entregador" ? "Entregador" : formatStoreType(pay.userRoleType)}
+                            </span>
+                          )
                         )}
                       </td>
                       <td className="p-3.5">
                         <span className="px-2 py-0.5 rounded bg-[#246BFD]/15 text-blue-200 font-bold">
-                          {pay.type === "plano" ? `Plano ${formatPlanType(pay.targetPlan)}` : "Anúncio Patrocinado"}
+                          {formatPaymentTypeBadge(pay)}
                         </span>
                       </td>
                       <td className="p-3.5 font-black text-[#B7F34A] tabular-nums whitespace-nowrap">
@@ -775,9 +798,11 @@ export const PaymentsSection: React.FC<{
               <div key={pay.id} className="p-4 rounded-2xl bg-[#172338] border border-[#26354B] space-y-2.5 text-xs">
                 <div className="flex items-start justify-between gap-2">
                   <div>
-                    <span className="font-black text-white block">{pay.storeName || pay.sellerName}</span>
+                    <span className="font-black text-white block">
+                      {pay.advertiserName || pay.storeName || pay.sellerName || "Utilizador"}
+                    </span>
                     <span className="text-[#A6B2C5]">
-                      {pay.type === "plano" ? `Plano ${formatPlanType(pay.targetPlan)}` : "Anúncio"} · {pay.method}
+                      {formatPaymentTypeBadge(pay)} · {pay.method}
                     </span>
                   </div>
                   <span className="font-black text-[#B7F34A] tabular-nums">{fmtKz(pay.amountKz)}</span>
@@ -834,39 +859,108 @@ export const PaymentsSection: React.FC<{
 };
 
 /* -------------------------------------------------------------------------- */
-/* 4. ANÚNCIOS (IMAGEM OU VÍDEO — SÓ LOJAS COM PLANO PAGO ACTIVO)             */
+/* 4. ANÚNCIOS (PLATAFORMA, EXTERNO SEM LOJA E LOJA COM PLANO PAGO)           */
 /* -------------------------------------------------------------------------- */
+export interface AdminAdFormPayload {
+  advertiserType: AdAdvertiserType;
+  advertiserName?: string;
+  title: string;
+  subtitle: string;
+  storeId?: string;
+  productId?: string;
+  destinationType: AdDestinationType;
+  destinationValue: string;
+  position: AdPosition;
+  mediaType: "imagem" | "video";
+  imageUrl: string;
+  videoUrl?: string;
+  startDate: string;
+  endDate: string;
+  paymentAmountKz?: number;
+  paymentMethod?: MerchantPayment["method"];
+  paymentReference?: string;
+  paymentProofUrl?: string;
+}
+
+function formatPositionLabel(pos: AdPosition): string {
+  switch (pos) {
+    case "faixa":
+      return "Faixa inferior";
+    case "topo":
+      return "Topo (Início)";
+    case "categoria":
+      return "Categorias";
+    case "pesquisa":
+      return "Pesquisa";
+    case "ecra_inteiro":
+      return "Ecrã inteiro";
+    default:
+      return pos;
+  }
+}
+
+function formatAdvertiserLabel(ad: SponsoredAd): string {
+  const type = resolveAdAdvertiserType(ad);
+  if (type === "plataforma") return "Plataforma";
+  if (type === "externo") return "Externo";
+  return "Loja";
+}
+
 export const AdsSection: React.FC<{
   ads: SponsoredAd[];
   stores: Store[];
-  onCreateAd: (payload: {
-    title: string;
-    subtitle: string;
-    storeId: string;
-    position: AdPosition;
-    mediaType: "imagem" | "video";
-    imageUrl: string;
-    videoUrl?: string;
-    startDate: string;
-    endDate: string;
-  }) => Promise<void>;
+  products?: Product[];
+  defaultAdvertiserType?: AdAdvertiserType;
+  onCreateAd: (payload: AdminAdFormPayload) => Promise<void>;
+  onUpdateAd?: (id: string, payload: AdminAdFormPayload) => Promise<void>;
   onToggleAd: (ad: SponsoredAd, nextActive: boolean) => void;
   onDeleteAd: (ad: SponsoredAd) => void;
-}> = ({ ads, stores, onCreateAd, onToggleAd, onDeleteAd }) => {
+}> = ({
+  ads,
+  stores,
+  products = [],
+  defaultAdvertiserType = "plataforma",
+  onCreateAd,
+  onUpdateAd,
+  onToggleAd,
+  onDeleteAd,
+}) => {
   const todayIso = () => new Date().toISOString().slice(0, 10);
   const plusDaysIso = (d: number) => new Date(Date.now() + d * 86400000).toISOString().slice(0, 10);
 
-  const paidStores = useMemo(() => stores.filter((s) => storeHasActivePaidPlan(s)), [stores]);
+  const formRef = useRef<HTMLFormElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
 
+  const paidStores = useMemo(() => stores.filter((s) => storeHasActivePaidPlan(s)), [stores]);
+  const activeStores = useMemo(() => stores.filter((s) => s.isApproved && !s.isSuspended), [stores]);
+  const approvedProducts = useMemo(() => products.filter((p) => p.isApproved !== false), [products]);
+
+  const [editingAdId, setEditingAdId] = useState<string | null>(null);
+  const [advertiserType, setAdvertiserType] = useState<AdAdvertiserType>(defaultAdvertiserType);
+  const [advertiserName, setAdvertiserName] = useState(
+    defaultAdvertiserType === "plataforma" ? "Mercado Uíge" : ""
+  );
   const [title, setTitle] = useState("");
   const [subtitle, setSubtitle] = useState("");
   const [storeId, setStoreId] = useState("");
-  const [position, setPosition] = useState<AdPosition>("topo");
+  const [productId, setProductId] = useState("");
+  const [destinationType, setDestinationType] = useState<AdDestinationType>(
+    defaultAdvertiserType === "loja" ? "loja" : "link"
+  );
+  const [destinationValue, setDestinationValue] = useState("");
+  const [position, setPosition] = useState<AdPosition>("faixa");
   const [mediaType, setMediaType] = useState<"imagem" | "video">("imagem");
   const [imageUrl, setImageUrl] = useState("");
   const [videoUrl, setVideoUrl] = useState("");
   const [startDate, setStartDate] = useState(todayIso);
   const [endDate, setEndDate] = useState(() => plusDaysIso(15));
+
+  // Pagamento de anunciante externo (registado em Pagamentos)
+  const [paymentAmountKz, setPaymentAmountKz] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState<MerchantPayment["method"]>("Transferência");
+  const [paymentReference, setPaymentReference] = useState("");
+  const [paymentProofUrl, setPaymentProofUrl] = useState("");
+
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const [mediaError, setMediaError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -883,6 +977,7 @@ export const AdsSection: React.FC<{
       if (q) {
         return (
           a.title.toLowerCase().includes(q) ||
+          (a.advertiserName || "").toLowerCase().includes(q) ||
           (a.storeName || "").toLowerCase().includes(q)
         );
       }
@@ -892,6 +987,77 @@ export const AdsSection: React.FC<{
 
   const paged = useMemo(() => filtered.slice((page - 1) * pageSize, page * pageSize), [filtered, page, pageSize]);
 
+  const resetForm = () => {
+    setEditingAdId(null);
+    setAdvertiserType("plataforma");
+    setAdvertiserName("Mercado Uíge");
+    setTitle("");
+    setSubtitle("");
+    setStoreId("");
+    setProductId("");
+    setDestinationType("loja");
+    setDestinationValue("");
+    setPosition("faixa");
+    setMediaType("imagem");
+    setImageUrl("");
+    setVideoUrl("");
+    setStartDate(todayIso());
+    setEndDate(plusDaysIso(15));
+    setPaymentAmountKz("");
+    setPaymentMethod("Transferência");
+    setPaymentReference("");
+    setPaymentProofUrl("");
+    setMediaError("");
+  };
+
+  const handleSelectAdvertiserType = (nextType: AdAdvertiserType) => {
+    setAdvertiserType(nextType);
+    setMediaError("");
+    if (nextType === "plataforma") {
+      setAdvertiserName("Mercado Uíge");
+      setStoreId("");
+    } else if (nextType === "externo") {
+      setAdvertiserName(advertiserName === "Mercado Uíge" ? "" : advertiserName);
+      setStoreId("");
+      if (destinationType === "loja") {
+        setDestinationType("link");
+      }
+    } else {
+      setDestinationType("loja");
+    }
+  };
+
+  const handleStartEdit = (ad: SponsoredAd) => {
+    const type = resolveAdAdvertiserType(ad);
+    setEditingAdId(ad.id);
+    setAdvertiserType(type);
+    setAdvertiserName(
+      ad.advertiserName || (type === "plataforma" ? "Mercado Uíge" : ad.storeName || "")
+    );
+    setTitle(ad.title || "");
+    setSubtitle(ad.subtitle || "");
+    setStoreId(ad.storeId || "");
+    setProductId(ad.productId || "");
+    setDestinationType(ad.destinationType || (ad.productId ? "produto" : "loja"));
+    setDestinationValue(ad.destinationValue || ad.storeId || ad.productId || "");
+    setPosition(ad.position || "topo");
+    setMediaType(ad.mediaType === "video" ? "video" : "imagem");
+    setImageUrl(ad.imageUrl || "");
+    setVideoUrl(ad.videoUrl || "");
+    setStartDate((ad.startDate || todayIso()).slice(0, 10));
+    setEndDate((ad.endDate || plusDaysIso(15)).slice(0, 10));
+    setPaymentAmountKz(ad.paymentAmountKz ? String(ad.paymentAmountKz) : "");
+    setPaymentProofUrl(ad.paymentProofUrl || "");
+    setMediaError("");
+    formRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  };
+
+  const handleFocusCreateFirst = () => {
+    resetForm();
+    formRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    titleInputRef.current?.focus();
+  };
+
   const handleUploadAdImage = async (file: File) => {
     setMediaError("");
     setUploadingMedia(true);
@@ -900,12 +1066,13 @@ export const AdsSection: React.FC<{
       if (isSupabaseConfigured && navigator.onLine) {
         const res = await uploadMediaFile(blob, file.name || `ad_${Date.now()}.jpg`, "anuncios");
         if (res.error) throw res.error;
-        setImageUrl(res.url || dataUrl);
+        if (!res.url) throw new Error("Não foi possível obter o URL público da imagem.");
+        setImageUrl(res.url);
       } else {
         setImageUrl(dataUrl);
       }
     } catch (err: unknown) {
-      setMediaError(translateErrorMessage(err, "Não foi possível carregar a imagem do anúncio."));
+      setMediaError(translateErrorMessage(err, "Falha ao carregar imagem do anúncio. Verifica o ficheiro e a ligação."));
     } finally {
       setUploadingMedia(false);
     }
@@ -915,16 +1082,46 @@ export const AdsSection: React.FC<{
     setMediaError("");
     setUploadingMedia(true);
     try {
-      const { blob, previewUrl } = await compressVideoOnDevice(file);
+      const { blob, previewUrl } = await compressVideoOnDevice(file, {
+        maxDurationSec: MAX_AD_VIDEO_DURATION_SEC,
+        maxBytes: MAX_AD_VIDEO_BYTES,
+        targetBytes: AD_VIDEO_TARGET_BYTES,
+      });
       if (isSupabaseConfigured && navigator.onLine) {
         const res = await uploadMediaFile(blob, `ad_video_${Date.now()}.webm`, "anuncios");
         if (res.error) throw res.error;
-        setVideoUrl(res.url || previewUrl);
+        if (!res.url) throw new Error("Não foi possível obter o URL público do vídeo.");
+        setVideoUrl(res.url);
       } else {
         setVideoUrl(previewUrl);
       }
     } catch (err: unknown) {
-      setMediaError(translateErrorMessage(err, "Não foi possível processar o vídeo (máx. 15 s e 5 MB)."));
+      setMediaError(
+        translateErrorMessage(
+          err,
+          "Falha ao carregar vídeo (máx. 30 s e 20 MB). Verifica o ficheiro e tenta novamente."
+        )
+      );
+    } finally {
+      setUploadingMedia(false);
+    }
+  };
+
+  const handleUploadExternalProof = async (file: File) => {
+    setMediaError("");
+    setUploadingMedia(true);
+    try {
+      const { blob, dataUrl } = await compressImage(file);
+      if (isSupabaseConfigured && navigator.onLine) {
+        const res = await uploadMediaFile(blob, file.name || `comprovativo_${Date.now()}.jpg`, "comprovativos");
+        if (res.error) throw res.error;
+        if (!res.url) throw new Error("Não foi possível obter o URL do comprovativo.");
+        setPaymentProofUrl(res.url);
+      } else {
+        setPaymentProofUrl(dataUrl);
+      }
+    } catch (err: unknown) {
+      setMediaError(translateErrorMessage(err, "Falha ao carregar o comprovativo do anunciante."));
     } finally {
       setUploadingMedia(false);
     }
@@ -933,61 +1130,123 @@ export const AdsSection: React.FC<{
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setMediaError("");
-    if (!title.trim()) return;
-    if (!storeId) {
+    if (!title.trim()) {
+      setMediaError("Indica o título da campanha.");
+      return;
+    }
+
+    if (advertiserType === "externo" && !advertiserName.trim()) {
+      setMediaError("Indica o nome do anunciante externo.");
+      return;
+    }
+
+    if (advertiserType === "loja" && !storeId) {
       setMediaError("Seleciona uma loja com plano pago activo.");
       return;
     }
-    if (mediaType === "video" && !videoUrl.trim()) {
-      setMediaError("Carrega ou cola o link do vídeo promocional (máx. 15 s).");
+
+    const effectiveStoreId =
+      advertiserType === "loja" ? storeId : destinationType === "loja" ? storeId : "";
+    const effectiveProductId = destinationType === "produto" ? productId : "";
+
+    const destCheck = validateSafeAdDestination(destinationType, destinationValue, {
+      storeId: effectiveStoreId,
+      productId: effectiveProductId,
+    });
+    if (!destCheck.ok) {
+      setMediaError(destCheck.error || "Destino de anúncio inválido.");
       return;
     }
+
+    if (mediaType === "video" && !videoUrl.trim()) {
+      setMediaError("Carrega ou cola o link do vídeo promocional.");
+      return;
+    }
+
     if (new Date(endDate).getTime() < new Date(startDate).getTime()) {
       setMediaError("A data de fim deve ser igual ou posterior à data de início.");
       return;
     }
 
-    const selectedStore = paidStores.find((s) => s.id === storeId);
-    const resolvedImage = imageUrl.trim() || selectedStore?.facadeImage || selectedStore?.logo || "";
+    const selectedStore = stores.find((s) => s.id === effectiveStoreId);
+    const resolvedImage =
+      imageUrl.trim() ||
+      (advertiserType === "loja" ? selectedStore?.facadeImage || selectedStore?.logo || "" : "");
+
+    const payload: AdminAdFormPayload = {
+      advertiserType,
+      advertiserName:
+        advertiserType === "plataforma"
+          ? advertiserName.trim() || "Mercado Uíge"
+          : advertiserType === "externo"
+          ? advertiserName.trim()
+          : selectedStore?.name,
+      title: title.trim(),
+      subtitle: subtitle.trim(),
+      storeId: effectiveStoreId || undefined,
+      productId: effectiveProductId || undefined,
+      destinationType,
+      destinationValue: destCheck.normalizedValue || destinationValue.trim(),
+      position,
+      mediaType,
+      imageUrl: resolvedImage,
+      videoUrl: mediaType === "video" ? videoUrl.trim() : undefined,
+      startDate: new Date(`${startDate}T00:00:00`).toISOString(),
+      endDate: new Date(`${endDate}T23:59:59`).toISOString(),
+      paymentAmountKz:
+        advertiserType === "externo" && Number(paymentAmountKz) > 0
+          ? Number(paymentAmountKz)
+          : undefined,
+      paymentMethod: advertiserType === "externo" ? paymentMethod : undefined,
+      paymentReference: advertiserType === "externo" ? paymentReference.trim() : undefined,
+      paymentProofUrl: advertiserType === "externo" ? paymentProofUrl.trim() || undefined : undefined,
+    };
 
     setSubmitting(true);
     try {
-      await onCreateAd({
-        title: title.trim(),
-        subtitle: subtitle.trim(),
-        storeId,
-        position,
-        mediaType,
-        imageUrl: resolvedImage,
-        videoUrl: mediaType === "video" ? videoUrl.trim() : undefined,
-        startDate: new Date(`${startDate}T00:00:00`).toISOString(),
-        endDate: new Date(`${endDate}T23:59:59`).toISOString(),
-      });
-      setTitle("");
-      setSubtitle("");
-      setImageUrl("");
-      setVideoUrl("");
+      if (editingAdId && onUpdateAd) {
+        await onUpdateAd(editingAdId, payload);
+      } else {
+        await onCreateAd(payload);
+      }
+      resetForm();
     } catch (err: unknown) {
-      setMediaError(translateErrorMessage(err, "Não foi possível criar o anúncio."));
+      setMediaError(translateErrorMessage(err, "Não foi possível guardar o anúncio."));
     } finally {
       setSubmitting(false);
     }
   };
 
+  const previewSponsorName =
+    advertiserType === "plataforma"
+      ? advertiserName.trim() || "Mercado Uíge"
+      : advertiserType === "externo"
+      ? advertiserName.trim() || "Anunciante Externo"
+      : stores.find((s) => s.id === storeId)?.name || "Loja Patrocinada";
+
+  const previewPoster =
+    imageUrl.trim() ||
+    (advertiserType === "loja"
+      ? stores.find((s) => s.id === storeId)?.facadeImage || stores.find((s) => s.id === storeId)?.logo || ""
+      : "");
+
   return (
     <div className="space-y-4 anim-fadeUp">
       <form
+        ref={formRef}
         onSubmit={handleSubmit}
-        className="p-4 rounded-2xl bg-[#172338] border border-[#26354B] space-y-3 text-xs"
+        className="p-4 rounded-2xl bg-[#172338] border border-[#26354B] space-y-4 text-xs"
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h3 className="font-black text-sm text-white">Novo Anúncio Patrocinado</h3>
+            <h3 className="font-black text-sm text-white">
+              {editingAdId ? "Editar Anúncio" : "Novo Anúncio"}
+            </h3>
             <p className="text-[11px] text-[#A6B2C5]">
-              Apenas lojas aprovadas com plano pago activo (Básico ou VIP) aparecem para patrocínio.
+              Cria anúncios da plataforma Mercado Uíge, de anunciantes externos (sem loja) ou de lojas com plano pago activo.
             </p>
           </div>
-          <div className="flex gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             <button
               type="button"
               onClick={() => setMediaType("imagem")}
@@ -1006,52 +1265,177 @@ export const AdsSection: React.FC<{
             >
               <Film size={13} /> Vídeo
             </button>
+            {editingAdId && (
+              <button
+                type="button"
+                onClick={resetForm}
+                className="px-3 py-1.5 rounded-lg font-bold bg-slate-700/60 text-white cursor-pointer"
+              >
+                Cancelar edição
+              </button>
+            )}
           </div>
         </div>
 
+        {/* 1. Tipo de anunciante (3 tipos) */}
+        <div className="space-y-1.5">
+          <label className="block text-[11px] font-bold text-[#A6B2C5]">Tipo de Anunciante</label>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {[
+              { id: "plataforma" as const, label: "Plataforma (Mercado Uíge)", desc: "Sem loja nem plano" },
+              { id: "externo" as const, label: "Externo (Cliente sem loja)", desc: "Com nome + pagamento opcional" },
+              { id: "loja" as const, label: "Loja (Com plano pago)", desc: `${paidStores.length} loja(s) elegível(is)` },
+            ].map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => handleSelectAdvertiserType(opt.id)}
+                className={`p-2.5 rounded-xl border text-left transition-colors cursor-pointer ${
+                  advertiserType === opt.id
+                    ? "bg-[#246BFD]/20 border-[#246BFD] text-white"
+                    : "bg-[#111D30] border-[#26354B] text-[#A6B2C5]"
+                }`}
+              >
+                <span className="font-black block">{opt.label}</span>
+                <span className="text-[10px] opacity-80">{opt.desc}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* 2. Identificação, Título, Subtítulo e Posição */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           <input
+            ref={titleInputRef}
             type="text"
             required
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder="Título da campanha *"
-            className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+            className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
           />
           <input
             type="text"
             value={subtitle}
             onChange={(e) => setSubtitle(e.target.value)}
             placeholder="Subtítulo promocional"
-            className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+            className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
           />
-          <select
-            required
-            value={storeId}
-            onChange={(e) => setStoreId(e.target.value)}
-            className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-          >
-            <option value="">
-              {paidStores.length === 0 ? "Sem lojas com plano pago activo" : "Selecionar loja (plano pago) *"}
-            </option>
-            {paidStores.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name} ({s.code || "LJ"} · {formatPlanType(s.planType)})
+
+          {advertiserType === "loja" ? (
+            <select
+              required
+              value={storeId}
+              onChange={(e) => setStoreId(e.target.value)}
+              className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+            >
+              <option value="">
+                {paidStores.length === 0 ? "Sem lojas com plano pago activo" : "Selecionar loja (plano pago) *"}
               </option>
-            ))}
-          </select>
+              {paidStores.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name} ({s.code || "LJ"} · {formatPlanType(s.planType)})
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              required={advertiserType === "externo"}
+              value={advertiserName}
+              onChange={(e) => setAdvertiserName(e.target.value)}
+              placeholder={
+                advertiserType === "plataforma"
+                  ? "Nome exibido (Mercado Uíge)"
+                  : "Nome do anunciante externo *"
+              }
+              className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
+            />
+          )}
+
           <select
+            aria-label="Posição do anúncio"
             value={position}
             onChange={(e) => setPosition(e.target.value as AdPosition)}
             className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
           >
-            <option value="topo">Posição: Topo</option>
-            <option value="categoria">Posição: Categoria</option>
+            <option value="faixa">Posição: Faixa acima da barra</option>
+            <option value="topo">Posição: Topo (Início)</option>
+            <option value="categoria">Posição: Categorias</option>
             <option value="pesquisa">Posição: Pesquisa</option>
+            <option value="ecra_inteiro">Posição: Ecrã inteiro</option>
           </select>
         </div>
 
+        {/* 3. Destino e Datas */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
+          <div>
+            <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">Tipo de Destino</label>
+            <select
+              aria-label="Tipo de destino do anúncio"
+              value={destinationType}
+              onChange={(e) => {
+                setDestinationType(e.target.value as AdDestinationType);
+                setMediaError("");
+              }}
+              className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+            >
+              <option value="loja">Abrir Loja</option>
+              <option value="produto">Abrir Artigo / Produto</option>
+              <option value="link">Link Externo (só https://)</option>
+              <option value="whatsapp">WhatsApp</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">
+              {destinationType === "link"
+                ? "URL Externa (https://) *"
+                : destinationType === "whatsapp"
+                ? "Número WhatsApp (9 dígitos) *"
+                : destinationType === "produto"
+                ? "Artigo de Destino *"
+                : "Loja de Destino *"}
+            </label>
+            {destinationType === "loja" ? (
+              <select
+                value={storeId}
+                onChange={(e) => setStoreId(e.target.value)}
+                className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+              >
+                <option value="">Selecionar loja de destino</option>
+                {(advertiserType === "loja" ? paidStores : activeStores).map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.code || "LJ"})
+                  </option>
+                ))}
+              </select>
+            ) : destinationType === "produto" ? (
+              <select
+                value={productId}
+                onChange={(e) => setProductId(e.target.value)}
+                className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+              >
+                <option value="">
+                  {approvedProducts.length === 0 ? "Sem artigos disponíveis" : "Selecionar artigo *"}
+                </option>
+                {approvedProducts.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} ({fmtKz(p.price)})
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="text"
+                value={destinationValue}
+                onChange={(e) => setDestinationValue(e.target.value)}
+                placeholder={destinationType === "link" ? "https://empresa.ao/promo" : "923000000"}
+                className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
+              />
+            )}
+          </div>
+
           <div>
             <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">Data de início</label>
             <input
@@ -1062,6 +1446,7 @@ export const AdsSection: React.FC<{
               className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
             />
           </div>
+
           <div>
             <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">Data de fim</label>
             <input
@@ -1072,7 +1457,10 @@ export const AdsSection: React.FC<{
               className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
             />
           </div>
+        </div>
 
+        {/* 4. Mídia (Upload de Imagem ou Vídeo) */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-end">
           <div className="flex gap-2 items-center">
             <input
               type="text"
@@ -1096,67 +1484,178 @@ export const AdsSection: React.FC<{
             </label>
           </div>
 
-          {mediaType === "video" ? (
-            <div className="flex gap-2 items-center">
-              <input
-                type="text"
-                value={videoUrl}
-                onChange={(e) => setVideoUrl(e.target.value)}
-                placeholder="URL do vídeo (ou carrega mp4/webm)"
-                className="flex-1 min-w-0 p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-              />
-              <label className="px-3 py-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-[#B7F34A] font-bold cursor-pointer inline-flex items-center gap-1 shrink-0">
-                <Film size={13} /> Vídeo
+          {mediaType === "video" && (
+            <div className="space-y-1">
+              <div className="flex gap-2 items-center">
                 <input
-                  type="file"
-                  accept="video/mp4,video/webm,video/quicktime"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) handleUploadAdVideo(f);
-                    e.target.value = "";
-                  }}
+                  type="text"
+                  value={videoUrl}
+                  onChange={(e) => setVideoUrl(e.target.value)}
+                  placeholder="URL do vídeo (ou carrega mp4/webm)"
+                  className="flex-1 min-w-0 p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
                 />
-              </label>
+                <label className="px-3 py-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-[#B7F34A] font-bold cursor-pointer inline-flex items-center gap-1 shrink-0">
+                  <Film size={13} /> Vídeo
+                  <input
+                    type="file"
+                    accept="video/mp4,video/webm,video/quicktime"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) handleUploadAdVideo(f);
+                      e.target.value = "";
+                    }}
+                  />
+                </label>
+              </div>
+              <p className="text-[10px] text-[#A6B2C5]">
+                Vídeo até 30 s e 20 MB (comprimido no dispositivo para ~8 MB).
+              </p>
             </div>
-          ) : (
-            <button
-              type="submit"
-              disabled={submitting || uploadingMedia || paidStores.length === 0}
-              className="w-full px-4 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
-            >
-              <Plus size={14} /> {uploadingMedia ? "A carregar…" : "Publicar Anúncio"}
-            </button>
           )}
         </div>
 
-        {mediaType === "video" && (
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-            <span className="text-[11px] text-[#A6B2C5]">
-              Em vídeo: autoplay sem som com controlo de som; em dados móveis exibe só a foto com botão reproduzir.
+        {/* 5. Pagamento de Anunciante Externo -> Pagamentos */}
+        {advertiserType === "externo" && !editingAdId && (
+          <div className="p-3 rounded-xl bg-[#111D30] border border-[#26354B] space-y-2">
+            <span className="font-bold text-[#B7F34A] block">
+              Pagamento do Anunciante Externo (registado automaticamente em Pagamentos)
             </span>
-            <button
-              type="submit"
-              disabled={submitting || uploadingMedia || paidStores.length === 0}
-              className="px-4 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
-            >
-              <Plus size={14} /> {uploadingMedia ? "A processar vídeo…" : "Publicar Anúncio em Vídeo"}
-            </button>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+              <input
+                type="number"
+                min={0}
+                value={paymentAmountKz}
+                onChange={(e) => setPaymentAmountKz(e.target.value)}
+                placeholder="Valor pago (Kz)"
+                className="p-2 rounded-lg bg-[#07111F] border border-[#26354B] text-white outline-none"
+              />
+              <select
+                value={paymentMethod}
+                onChange={(e) => setPaymentMethod(e.target.value as MerchantPayment["method"])}
+                className="p-2 rounded-lg bg-[#07111F] border border-[#26354B] text-white outline-none"
+              >
+                <option value="Transferência">Transferência</option>
+                <option value="Multicaixa Express">Multicaixa Express</option>
+                <option value="Referência">Referência</option>
+              </select>
+              <input
+                type="text"
+                value={paymentReference}
+                onChange={(e) => setPaymentReference(e.target.value)}
+                placeholder="Referência / Borderô"
+                className="p-2 rounded-lg bg-[#07111F] border border-[#26354B] text-white outline-none"
+              />
+              <div className="flex gap-1.5 items-center">
+                <input
+                  type="text"
+                  value={paymentProofUrl}
+                  onChange={(e) => setPaymentProofUrl(e.target.value)}
+                  placeholder="Comprovativo (URL ou foto)"
+                  className="flex-1 min-w-0 p-2 rounded-lg bg-[#07111F] border border-[#26354B] text-white outline-none"
+                />
+                <label className="px-2.5 py-2 rounded-lg bg-[#172338] border border-[#26354B] text-[#B7F34A] font-bold cursor-pointer inline-flex items-center gap-1 shrink-0">
+                  <Upload size={12} />
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) handleUploadExternalProof(f);
+                      e.target.value = "";
+                    }}
+                  />
+                </label>
+              </div>
+            </div>
           </div>
         )}
 
-        {mediaError && <p className="text-red-400 font-bold text-xs">{mediaError}</p>}
+        {/* 6. Pré-visualização ao vivo */}
+        <div
+          data-testid="admin-ad-preview"
+          className="p-3 rounded-xl bg-[#07111F] border border-[#246BFD]/35 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
+        >
+          <div className="space-y-1 min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="px-2 py-0.5 rounded bg-[#B7F34A] text-slate-950 font-black text-[10px] uppercase">
+                Patrocinado
+              </span>
+              <span className="text-[11px] font-bold text-[#A6B2C5]">
+                Pré-visualização · {previewSponsorName} · {formatPositionLabel(position)}
+              </span>
+            </div>
+            <p className="font-black text-sm text-white truncate">
+              {title.trim() || "Título do teu anúncio"}
+            </p>
+            {subtitle.trim() && (
+              <p className="text-[11px] text-[#A6B2C5] truncate">{subtitle.trim()}</p>
+            )}
+          </div>
+
+          {(mediaType === "video" ? videoUrl.trim() : previewPoster) && (
+            <div className="w-full sm:w-44 h-24 rounded-lg overflow-hidden bg-[#111D30] border border-[#26354B] shrink-0">
+              {mediaType === "video" && videoUrl.trim() ? (
+                <video
+                  src={videoUrl.trim()}
+                  poster={previewPoster || undefined}
+                  controls
+                  muted
+                  playsInline
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <img
+                  src={previewPoster}
+                  alt="Pré-visualização do anúncio"
+                  className="w-full h-full object-cover"
+                />
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-[11px] text-[#A6B2C5]">
+            {mediaType === "video"
+              ? "Em vídeo: autoplay sem som com controlo de som; em dados móveis exibe só a capa com botão Reproduzir."
+              : "Apenas links externos seguros com https:// são aceites."}
+          </span>
+          <button
+            type="submit"
+            disabled={submitting || uploadingMedia || (advertiserType === "loja" && paidStores.length === 0)}
+            className="px-4 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+          >
+            <Plus size={14} />
+            {uploadingMedia
+              ? "A processar ficheiro…"
+              : submitting
+              ? "A guardar…"
+              : editingAdId
+              ? "Guardar Alterações"
+              : mediaType === "video"
+              ? "Publicar Anúncio em Vídeo"
+              : "Publicar Anúncio"}
+          </button>
+        </div>
+
+        {mediaError && (
+          <div className="p-2.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 font-bold text-xs">
+            {mediaError}
+          </div>
+        )}
       </form>
 
       <TableToolbar
         title="Anúncios Patrocinados"
-        subtitle="Controlo de visualizações, cliques, mídia (imagem/vídeo) e prazo das campanhas."
+        subtitle="Controlo de campanhas da plataforma, anunciantes externos e lojas com plano pago."
         search={search}
         onSearchChange={(v) => {
           setSearch(v);
           setPage(1);
         }}
-        searchPlaceholder="Pesquisar por título do anúncio ou loja..."
+        searchPlaceholder="Pesquisar por título, anunciante ou loja..."
         filterValue={posFilter}
         onFilterChange={(v) => {
           setPosFilter(v);
@@ -1164,19 +1663,23 @@ export const AdsSection: React.FC<{
         }}
         filterOptions={[
           { value: "todos", label: "Todas as posições" },
+          { value: "faixa", label: "Faixa inferior" },
           { value: "topo", label: "Topo" },
           { value: "categoria", label: "Categoria" },
           { value: "pesquisa", label: "Pesquisa" },
+          { value: "ecra_inteiro", label: "Ecrã inteiro" },
         ]}
         onExportCsv={() =>
           downloadCsv(
             "anuncios-mercado-uige",
-            ["Título", "Loja", "Mídia", "Posição", "Visualizações", "Cliques", "Estado", "Início", "Fim"],
+            ["Título", "Tipo Anunciante", "Anunciante / Loja", "Destino", "Mídia", "Posição", "Visualizações", "Cliques", "Estado", "Início", "Fim"],
             filtered.map((a) => [
               a.title,
-              a.storeName || "",
+              formatAdvertiserLabel(a),
+              a.advertiserName || a.storeName || "Mercado Uíge",
+              `${a.destinationType || "loja"}: ${a.destinationValue || a.storeId || a.productId || ""}`,
               a.mediaType === "video" ? "Vídeo" : "Imagem",
-              a.position,
+              formatPositionLabel(a.position),
               a.views,
               a.clicks,
               a.active ? "Activo" : a.status,
@@ -1188,9 +1691,23 @@ export const AdsSection: React.FC<{
         totalFiltered={filtered.length}
       />
 
-      {paged.length === 0 ? (
+      {ads.length === 0 ? (
+        <div className="p-8 text-center rounded-2xl bg-[#172338] border border-[#26354B] space-y-3">
+          <p className="font-bold text-sm text-white">Ainda não há anúncios criados.</p>
+          <p className="text-xs text-[#A6B2C5] max-w-md mx-auto">
+            Cria campanhas da própria plataforma Mercado Uíge, de anunciantes externos ou de lojas parceiras com plano pago activo.
+          </p>
+          <button
+            type="button"
+            onClick={handleFocusCreateFirst}
+            className="px-4 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black text-xs inline-flex items-center gap-1.5 cursor-pointer"
+          >
+            <Plus size={14} /> Criar o primeiro anúncio
+          </button>
+        </div>
+      ) : paged.length === 0 ? (
         <div className="p-8 text-center rounded-2xl bg-[#172338] border border-[#26354B] text-xs text-[#A6B2C5]">
-          Nenhum anúncio encontrado.
+          Nenhum anúncio encontrado com os filtros aplicados.
         </div>
       ) : (
         <>
@@ -1199,7 +1716,7 @@ export const AdsSection: React.FC<{
               <table className="w-full text-left text-xs">
                 <thead className="bg-[#111D30] text-[#A6B2C5] uppercase font-bold">
                   <tr>
-                    <th className="p-3.5">Campanha</th>
+                    <th className="p-3.5">Campanha / Anunciante</th>
                     <th className="p-3.5">Mídia / Posição</th>
                     <th className="p-3.5">Métricas</th>
                     <th className="p-3.5">Datas</th>
@@ -1212,7 +1729,12 @@ export const AdsSection: React.FC<{
                     <tr key={ad.id} className="hover:bg-[#111D30]/40">
                       <td className="p-3.5">
                         <span className="font-bold text-white block">{ad.title}</span>
-                        <span className="text-[#A6B2C5]">{ad.storeName || "Campanha Provincial"}</span>
+                        <span className="text-[#A6B2C5] inline-flex items-center gap-1.5">
+                          <span className="px-1.5 py-0.5 rounded bg-[#246BFD]/15 text-blue-200 text-[10px] font-bold">
+                            {formatAdvertiserLabel(ad)}
+                          </span>
+                          <span>{ad.advertiserName || ad.storeName || "Mercado Uíge"}</span>
+                        </span>
                       </td>
                       <td className="p-3.5">
                         <div className="flex items-center gap-1.5">
@@ -1220,7 +1742,7 @@ export const AdsSection: React.FC<{
                             {ad.mediaType === "video" ? <Film size={11} className="text-[#B7F34A]" /> : <ImageIcon size={11} className="text-[#246BFD]" />}
                             {ad.mediaType === "video" ? "Vídeo" : "Imagem"}
                           </span>
-                          <span className="uppercase font-black text-[#246BFD]">{ad.position}</span>
+                          <span className="font-black text-[#246BFD]">{formatPositionLabel(ad.position)}</span>
                         </div>
                       </td>
                       <td className="p-3.5 text-[#A6B2C5] tabular-nums">
@@ -1247,6 +1769,15 @@ export const AdsSection: React.FC<{
                       </td>
                       <td className="p-3.5 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1.5">
+                          {onUpdateAd && (
+                            <button
+                              type="button"
+                              onClick={() => handleStartEdit(ad)}
+                              className="px-2.5 py-1 rounded-lg bg-[#111D30] border border-[#26354B] text-white font-bold inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <Pencil size={11} /> Editar
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => onToggleAd(ad, !ad.active)}
@@ -1281,7 +1812,8 @@ export const AdsSection: React.FC<{
                   <div>
                     <span className="font-bold text-white block">{ad.title}</span>
                     <span className="text-[#A6B2C5]">
-                      {ad.storeName || "Campanha"} · {ad.mediaType === "video" ? "Vídeo" : "Imagem"} · {ad.position}
+                      {formatAdvertiserLabel(ad)} · {ad.advertiserName || ad.storeName || "Mercado Uíge"} ·{" "}
+                      {ad.mediaType === "video" ? "Vídeo" : "Imagem"} · {formatPositionLabel(ad.position)}
                     </span>
                   </div>
                   <span className="text-[11px] text-[#A6B2C5] shrink-0">
@@ -1293,6 +1825,15 @@ export const AdsSection: React.FC<{
                   <span>{ad.clicks} cliques</span>
                 </div>
                 <div className="pt-2 border-t border-[#26354B] flex gap-2">
+                  {onUpdateAd && (
+                    <button
+                      type="button"
+                      onClick={() => handleStartEdit(ad)}
+                      className="px-3 py-1.5 rounded-lg bg-[#111D30] border border-[#26354B] text-white font-bold cursor-pointer"
+                    >
+                      Editar
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => onToggleAd(ad, !ad.active)}

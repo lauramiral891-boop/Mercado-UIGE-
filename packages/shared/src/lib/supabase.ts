@@ -334,10 +334,19 @@ export async function confirmPasswordResetWithOtp(params: {
 }
 
 
+export const MAX_STORAGE_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB (bucket 'produtos')
+
 /**
- * Carrega fotografia comprimida (produto, fachada, BI ou comprovativo) para o Supabase Storage
+ * Carrega fotografia ou vídeo comprimido (produto, anúncio, fachada, BI ou comprovativo) para o Supabase Storage
  */
 export async function uploadProductImage(file: File | Blob, fileName: string, folder = "produtos") {
+  if (file.size > MAX_STORAGE_UPLOAD_BYTES) {
+    return {
+      url: null,
+      error: new Error("O ficheiro excede o limite de 20 MB do Storage."),
+    };
+  }
+
   if (!isSupabaseConfigured) {
     return { url: URL.createObjectURL(file), error: null };
   }
@@ -352,7 +361,16 @@ export async function uploadProductImage(file: File | Blob, fileName: string, fo
       contentType: file.type || undefined,
     });
 
-  if (error) return { url: null, error };
+  if (error) {
+    const rawMsg = String((error as { message?: string }).message || "").toLowerCase();
+    if (rawMsg.includes("maximum allowed size") || rawMsg.includes("payload too large") || rawMsg.includes("413")) {
+      return {
+        url: null,
+        error: new Error("O ficheiro excede o limite de 20 MB no Storage do servidor."),
+      };
+    }
+    return { url: null, error };
+  }
 
   const { data: publicUrlData } = supabase.storage
     .from("produtos")

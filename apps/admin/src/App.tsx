@@ -83,6 +83,7 @@ import {
   UsersSection,
   PaymentsSection,
   AdsSection,
+  AdminAdFormPayload,
   DeliveriesSection,
   ReportsSection,
   AuditSection,
@@ -917,44 +918,118 @@ export const AdminApp: React.FC = () => {
     await loadData();
   };
 
-  const handleCreateAdminAd = async (payload: {
-    title: string;
-    subtitle: string;
-    storeId: string;
-    position: AdPosition;
-    mediaType: "imagem" | "video";
-    imageUrl: string;
-    videoUrl?: string;
-    startDate: string;
-    endDate: string;
-  }) => {
+  const handleCreateAdminAd = async (payload: AdminAdFormPayload) => {
     if (!currentUser) return;
-    const st = stores.find((s) => s.id === payload.storeId);
-    if (!st || !storeHasActivePaidPlan(st)) {
-      showToast("Apenas lojas com plano pago activo podem ter anúncios patrocinados.");
-      return;
+    const st = payload.storeId ? stores.find((s) => s.id === payload.storeId) : undefined;
+    if (payload.advertiserType === "loja" && (!st || !storeHasActivePaidPlan(st))) {
+      throw new Error("Apenas lojas com plano pago activo podem ter anúncios patrocinados.");
     }
-    await adRepo.create({
-      sellerId: st.ownerId,
-      storeId: st.id,
-      storeName: st.name,
+    if (payload.advertiserType === "externo" && !(payload.advertiserName || "").trim()) {
+      throw new Error("Indica o nome do anunciante externo.");
+    }
+
+    const createdAd = await adRepo.create({
+      advertiserType: payload.advertiserType,
+      advertiserName:
+        payload.advertiserType === "plataforma"
+          ? payload.advertiserName?.trim() || "Mercado Uíge"
+          : payload.advertiserType === "externo"
+          ? payload.advertiserName?.trim()
+          : st?.name,
+      sellerId: payload.advertiserType === "loja" && st ? st.ownerId : currentUser.id,
+      storeId: payload.advertiserType === "loja" && st ? st.id : payload.destinationType === "loja" ? payload.storeId : undefined,
+      storeName: payload.advertiserType === "loja" && st ? st.name : undefined,
+      productId: payload.productId,
+      destinationType: payload.destinationType,
+      destinationValue: payload.destinationValue,
       title: payload.title,
       subtitle: payload.subtitle,
-      imageUrl: payload.imageUrl || st.facadeImage || st.logo || "",
+      imageUrl: payload.imageUrl || (st ? st.facadeImage || st.logo || "" : ""),
       videoUrl: payload.videoUrl || null,
       mediaType: payload.mediaType,
       position: payload.position,
       startDate: payload.startDate,
       endDate: payload.endDate,
+      paymentAmountKz: payload.paymentAmountKz,
+      paymentProofUrl: payload.paymentProofUrl,
       active: true,
       status: "aprovado",
     });
-    await auditRepo.log(currentUser.id, "CREATE_AD", st.name, {
+
+    if (
+      payload.advertiserType === "externo" &&
+      ((payload.paymentAmountKz && payload.paymentAmountKz > 0) || payload.paymentProofUrl)
+    ) {
+      await paymentRepo.create({
+        sellerId: currentUser.id,
+        sellerName: payload.advertiserName?.trim() || currentUser.name,
+        advertiserName: payload.advertiserName?.trim(),
+        type: "anuncio_externo",
+        adId: createdAd.id,
+        amountKz: payload.paymentAmountKz || 0,
+        method: payload.paymentMethod || "Transferência",
+        reference: payload.paymentReference || "",
+        proofUrl: payload.paymentProofUrl || "",
+      });
+    }
+
+    await auditRepo.log(
+      currentUser.id,
+      "CREATE_AD",
+      payload.advertiserName || st?.name || "Mercado Uíge",
+      {
+        advertiserType: payload.advertiserType,
+        destinationType: payload.destinationType,
+        title: payload.title,
+        mediaType: payload.mediaType,
+        position: payload.position,
+      }
+    );
+    showToast(
+      payload.advertiserType === "externo" && payload.paymentAmountKz
+        ? "Anúncio externo publicado e pagamento registado em Pagamentos!"
+        : "Anúncio publicado!"
+    );
+    await loadData();
+  };
+
+  const handleUpdateAdminAd = async (id: string, payload: AdminAdFormPayload) => {
+    if (!currentUser) return;
+    const st = payload.storeId ? stores.find((s) => s.id === payload.storeId) : undefined;
+    if (payload.advertiserType === "loja" && (!st || !storeHasActivePaidPlan(st))) {
+      throw new Error("Apenas lojas com plano pago activo podem ter anúncios patrocinados.");
+    }
+
+    await adRepo.update(id, {
+      advertiserType: payload.advertiserType,
+      advertiserName:
+        payload.advertiserType === "plataforma"
+          ? payload.advertiserName?.trim() || "Mercado Uíge"
+          : payload.advertiserType === "externo"
+          ? payload.advertiserName?.trim()
+          : st?.name,
+      storeId: payload.advertiserType === "loja" && st ? st.id : payload.destinationType === "loja" ? payload.storeId : undefined,
+      storeName: payload.advertiserType === "loja" && st ? st.name : undefined,
+      productId: payload.productId,
+      destinationType: payload.destinationType,
+      destinationValue: payload.destinationValue,
       title: payload.title,
+      subtitle: payload.subtitle,
+      imageUrl: payload.imageUrl || (st ? st.facadeImage || st.logo || "" : ""),
+      videoUrl: payload.mediaType === "video" ? payload.videoUrl || null : null,
       mediaType: payload.mediaType,
       position: payload.position,
+      startDate: payload.startDate,
+      endDate: payload.endDate,
     });
-    showToast("Anúncio patrocinado publicado!");
+
+    await auditRepo.log(currentUser.id, "UPDATE_AD", payload.title, {
+      adId: id,
+      advertiserType: payload.advertiserType,
+      destinationType: payload.destinationType,
+      position: payload.position,
+    });
+    showToast("Anúncio actualizado!");
     await loadData();
   };
 
@@ -1442,7 +1517,9 @@ export const AdminApp: React.FC = () => {
             <AdsSection
               ads={ads}
               stores={stores}
+              products={products}
               onCreateAd={handleCreateAdminAd}
+              onUpdateAd={handleUpdateAdminAd}
               onToggleAd={requestToggleAd}
               onDeleteAd={requestDeleteAd}
             />

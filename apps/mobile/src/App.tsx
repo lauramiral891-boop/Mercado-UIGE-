@@ -61,10 +61,11 @@ import {
   recordSearchHistory,
   recordProductClick,
   getLocalPersonalizationSignals,
-  canMerchantPublishFloating,
+  resolvePublishAction,
   canShowFullscreenAd,
-  isAdEligibleForPaidStore,
+  isAdEligibleForPublicDisplay,
   isEditableElementFocused,
+  validateSafeAdDestination,
   productRepo,
   orderRepo,
   messageRepo,
@@ -89,12 +90,14 @@ import {
 
 import { Header } from "./components/Header";
 import { BottomNav } from "./components/BottomNav";
+import { BottomAdStrip } from "./components/BottomAdStrip";
 import { ProductCard } from "./components/ProductCard";
 import { LocationModal } from "./components/LocationModal";
 import { AuthModal } from "./components/AuthModal";
 import { ProductDetailModal } from "./components/ProductDetailModal";
 import { PrivacyPolicyModal } from "./components/PrivacyPolicyModal";
 import { PublishProductModal } from "./components/PublishProductModal";
+import { WantToSellModal } from "./components/WantToSellModal";
 import { SponsoredMediaView } from "./components/SponsoredMediaView";
 import { FullscreenAdOverlay } from "./components/FullscreenAdOverlay";
 import { CourierView } from "./components/CourierView";
@@ -112,9 +115,9 @@ const CAT_ICON_MAP: Record<string, any> = {
   tag: Tag,
 };
 
-export const MobileApp: React.FC = () => {
+export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted = false }) => {
   // Splash & Theme
-  const [booted, setBooted] = useState(false);
+  const [booted, setBooted] = useState(initialBooted);
   const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
   const [location, setLocation] = useState("Uíge, Centro da Cidade");
   const [showLocationModal, setShowLocationModal] = useState(false);
@@ -148,6 +151,7 @@ export const MobileApp: React.FC = () => {
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<"login" | "register">("login");
   const [publishModalOpen, setPublishModalOpen] = useState(false);
+  const [wantToSellModalOpen, setWantToSellModalOpen] = useState(false);
   const [confirmDeleteAccount, setConfirmDeleteAccount] = useState(false);
 
   // Merchant & Courier Extra Data
@@ -201,8 +205,9 @@ export const MobileApp: React.FC = () => {
   });
   const [isListening, setIsListening] = useState(false);
 
-  // Sponsored Ads Carousel, Fullscreen Interstitial & View Tracking
+  // Sponsored Ads Carousel, Bottom Strip, Fullscreen Interstitial & View Tracking
   const [adSlideIdx, setAdSlideIdx] = useState(0);
+  const [dismissedStripAdIds, setDismissedStripAdIds] = useState<string[]>([]);
   const viewedAdsRef = useRef<Set<string>>(new Set());
   const [fullscreenAd, setFullscreenAd] = useState<SponsoredAd | null>(null);
   const [fullscreenRotationIdx, setFullscreenRotationIdx] = useState(0);
@@ -286,6 +291,10 @@ export const MobileApp: React.FC = () => {
         setPublishModalOpen(false);
         return;
       }
+      if (wantToSellModalOpen) {
+        setWantToSellModalOpen(false);
+        return;
+      }
       if (viewHistory.length > 1) {
         const nextHistory = [...viewHistory];
         nextHistory.pop();
@@ -296,7 +305,7 @@ export const MobileApp: React.FC = () => {
     });
 
     return cleanup;
-  }, [selectedProduct, showLocationModal, showPrivacyModal, authModalOpen, publishModalOpen, viewHistory]);
+  }, [selectedProduct, showLocationModal, showPrivacyModal, authModalOpen, publishModalOpen, wantToSellModalOpen, viewHistory]);
 
   // Automatic Offline Sync Queue flush when online
   useEffect(() => {
@@ -457,14 +466,23 @@ export const MobileApp: React.FC = () => {
     };
   }, []);
 
-  // Sponsored Ads Carousels & View Tracking (só lojas com plano pago activo)
-  const paidEligibleAds = useMemo(
-    () => ads.filter((a) => isAdEligibleForPaidStore(a, stores)),
+  // Sponsored Ads Carousels & View Tracking (plataforma, externo ou loja com plano pago activo)
+  const eligibleAds = useMemo(
+    () => ads.filter((a) => isAdEligibleForPublicDisplay(a, stores)),
     [ads, stores]
   );
-  const topAds = useMemo(() => paidEligibleAds.filter((a) => a.position === "topo"), [paidEligibleAds]);
-  const categoryAds = useMemo(() => paidEligibleAds.filter((a) => a.position === "categoria"), [paidEligibleAds]);
-  const searchAds = useMemo(() => paidEligibleAds.filter((a) => a.position === "pesquisa"), [paidEligibleAds]);
+  const topAds = useMemo(() => eligibleAds.filter((a) => a.position === "topo"), [eligibleAds]);
+  const stripAds = useMemo(
+    () => eligibleAds.filter((a) => a.position === "faixa" && !dismissedStripAdIds.includes(a.id)),
+    [eligibleAds, dismissedStripAdIds]
+  );
+  const activeStripAd = stripAds[0] || null;
+  const categoryAds = useMemo(() => eligibleAds.filter((a) => a.position === "categoria"), [eligibleAds]);
+  const searchAds = useMemo(() => eligibleAds.filter((a) => a.position === "pesquisa"), [eligibleAds]);
+  const fullscreenPool = useMemo(() => {
+    const dedicated = eligibleAds.filter((a) => a.position === "ecra_inteiro");
+    return dedicated.length > 0 ? dedicated : eligibleAds;
+  }, [eligibleAds]);
 
   useEffect(() => {
     if (topAds.length <= 1) return;
@@ -488,7 +506,11 @@ export const MobileApp: React.FC = () => {
       viewedAdsRef.current.add(visibleAd.id);
       adRepo.trackView(visibleAd.id).catch(() => {});
     }
-  }, [view, adSlideIdx, topAds, categoryAds, searchAds]);
+    if (activeStripAd && !viewedAdsRef.current.has(activeStripAd.id)) {
+      viewedAdsRef.current.add(activeStripAd.id);
+      adRepo.trackView(activeStripAd.id).catch(() => {});
+    }
+  }, [view, adSlideIdx, topAds, categoryAds, searchAds, activeStripAd]);
 
   // Rastreio de uso activo da app e detecção de digitação para anúncio de ecrã inteiro
   useEffect(() => {
@@ -519,6 +541,7 @@ export const MobileApp: React.FC = () => {
       showLocationModal ||
       showPrivacyModal ||
       publishModalOpen ||
+      wantToSellModalOpen ||
       fullscreenAd
   );
 
@@ -531,13 +554,13 @@ export const MobileApp: React.FC = () => {
         currentView: view,
         isModalOpen: anyModalOpenForAds,
         isTyping,
-        hasEligibleAd: paidEligibleAds.length > 0,
+        hasEligibleAd: fullscreenPool.length > 0,
       })
     ) {
       return;
     }
 
-    const chosen = paidEligibleAds[fullscreenRotationIdx % paidEligibleAds.length];
+    const chosen = fullscreenPool[fullscreenRotationIdx % fullscreenPool.length];
     if (!chosen) return;
     const shownNow = Date.now();
     setFullscreenAd(chosen);
@@ -553,21 +576,57 @@ export const MobileApp: React.FC = () => {
     view,
     anyModalOpenForAds,
     isTyping,
-    paidEligibleAds,
+    fullscreenPool,
     fullscreenRotationIdx,
   ]);
 
+  const openExternalSafeHref = (safeHttpsUrl: string) => {
+    if (typeof document === "undefined") return;
+    const a = document.createElement("a");
+    a.href = safeHttpsUrl;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
   const handleOpenSponsoredAd = (ad: SponsoredAd, forceOpenStore = false) => {
     adRepo.trackClick(ad.id).catch(() => {});
-    if (!forceOpenStore && ad.productId) {
-      const targetProd = products.find((p) => p.id === ad.productId);
+    const destType = ad.destinationType || (ad.productId ? "produto" : "loja");
+
+    if (destType === "link") {
+      const check = validateSafeAdDestination("link", ad.destinationValue);
+      if (check.ok && check.normalizedValue) {
+        openExternalSafeHref(check.normalizedValue);
+      } else {
+        showToast("Link externo do anúncio inválido.");
+      }
+      return;
+    }
+
+    if (destType === "whatsapp") {
+      const check = validateSafeAdDestination("whatsapp", ad.destinationValue);
+      if (check.ok && check.normalizedValue) {
+        openExternalSafeHref(check.normalizedValue);
+      } else {
+        showToast("Contacto WhatsApp do anúncio indisponível.");
+      }
+      return;
+    }
+
+    if (destType === "produto" || (!forceOpenStore && ad.productId)) {
+      const targetProdId = ad.productId || ad.destinationValue;
+      const targetProd = targetProdId ? products.find((p) => p.id === targetProdId) : undefined;
       if (targetProd) {
         openProductDetails(targetProd);
         return;
       }
     }
-    if (ad.storeId) {
-      const targetStore = stores.find((s) => s.id === ad.storeId);
+
+    const targetStoreId = ad.storeId || (destType === "loja" ? ad.destinationValue : undefined);
+    if (targetStoreId) {
+      const targetStore = stores.find((s) => s.id === targetStoreId);
       if (targetStore) {
         openStoreDetails(targetStore);
         return;
@@ -648,15 +707,22 @@ export const MobileApp: React.FC = () => {
     return stores.find((s) => s.ownerId === user.id) || null;
   }, [stores, user]);
 
-  const canShowFloatingPublish =
-    canMerchantPublishFloating(user, myStore) &&
-    view !== "cart" &&
-    !selectedProduct &&
-    !authModalOpen &&
-    !showLocationModal &&
-    !showPrivacyModal &&
-    !publishModalOpen &&
-    !fullscreenAd;
+  const handleSelectBottomNav = (targetId: string) => {
+    if (targetId === "publish") {
+      const action = resolvePublishAction(user, myStore);
+      if (action === "publish") {
+        setPublishModalOpen(true);
+      } else if (action === "want_to_sell") {
+        setWantToSellModalOpen(true);
+      } else {
+        setAuthModalMode("login");
+        setAuthModalOpen(true);
+        showToast("Inicia sessão para publicar artigos.");
+      }
+      return;
+    }
+    navigateTo(targetId);
+  };
 
   const myProducts = useMemo(() => {
     if (!user) return [];
@@ -1018,7 +1084,11 @@ export const MobileApp: React.FC = () => {
 
   return (
     <div
-      className="min-h-screen flex flex-col justify-between pb-24 md:pb-6 transition-colors duration-200"
+      className={`min-h-screen flex flex-col justify-between transition-colors duration-200 md:pb-8 ${
+        activeStripAd
+          ? "pb-[calc(8.5rem+env(safe-area-inset-bottom,0px))]"
+          : "pb-[calc(5.25rem+env(safe-area-inset-bottom,0px))]"
+      }`}
       style={{
         backgroundColor: "var(--background)",
         color: "var(--text-primary)",
@@ -1077,8 +1147,10 @@ export const MobileApp: React.FC = () => {
                       >
                         Patrocinado
                       </span>
-                      {currentTopAd.storeName && (
-                        <span className="text-xs font-bold opacity-85 truncate">{currentTopAd.storeName}</span>
+                      {(currentTopAd.advertiserName || currentTopAd.storeName) && (
+                        <span className="text-xs font-bold opacity-85 truncate">
+                          {currentTopAd.advertiserName || currentTopAd.storeName}
+                        </span>
                       )}
                     </div>
                     <h1 className="text-xl sm:text-3xl font-black leading-tight tracking-tight">
@@ -2629,21 +2701,23 @@ export const MobileApp: React.FC = () => {
         )}
       </main>
 
-      {/* Botão flutuante "+ Publicar" exclusivo para comerciantes aprovados */}
-      {canShowFloatingPublish && (
-        <button
-          type="button"
-          onClick={() => setPublishModalOpen(true)}
-          className="fixed bottom-20 md:bottom-6 right-4 md:right-6 z-30 min-h-[48px] px-4 py-3 rounded-2xl bg-[#B7F34A] text-slate-950 font-black text-xs shadow-2xl border border-black/15 flex items-center gap-1.5 cursor-pointer active:scale-95 transition-transform"
-          aria-label="Publicar artigo"
-        >
-          <Plus size={18} strokeWidth={2.75} />
-          <span>Publicar</span>
-        </button>
-      )}
-
-      {/* Android Bottom Navigation */}
-      <BottomNav activeView={view} onSelectNav={navigateTo} cartCount={cartCount} />
+      {/* Dock Inferior Mobile: Faixa de anúncio fina ACIMA da barra + Barra de Navegação */}
+      <div
+        data-testid="mobile-bottom-dock"
+        className="md:hidden fixed bottom-0 inset-x-0 z-40 flex flex-col pointer-events-none"
+      >
+        <BottomAdStrip
+          ad={activeStripAd}
+          onOpen={(ad) => handleOpenSponsoredAd(ad)}
+          onDismiss={(id) => setDismissedStripAdIds((prev) => (prev.includes(id) ? prev : [...prev, id]))}
+        />
+        <BottomNav
+          activeView={view}
+          onSelectNav={handleSelectBottomNav}
+          cartCount={cartCount}
+          embedded={true}
+        />
+      </div>
 
       {/* Modals */}
       <LocationModal
@@ -2672,6 +2746,19 @@ export const MobileApp: React.FC = () => {
         categories={categories}
         systemConfig={systemConfig}
         onPublished={async () => {
+          await loadData();
+        }}
+        onGoToSeller={() => navigateTo("seller")}
+        showToast={showToast}
+      />
+
+      <WantToSellModal
+        isOpen={wantToSellModalOpen}
+        onClose={() => setWantToSellModalOpen(false)}
+        user={user}
+        myStore={myStore}
+        categories={categories}
+        onSubmitted={async () => {
           await loadData();
         }}
         onGoToSeller={() => navigateTo("seller")}
@@ -2739,7 +2826,9 @@ export const MobileApp: React.FC = () => {
       {/* Toast Alert */}
       {toast && (
         <div
-          className="fixed bottom-20 md:bottom-8 left-1/2 -translate-x-1/2 z-50 max-w-[calc(100vw-24px)] px-4 sm:px-5 py-3 rounded-2xl font-black text-xs shadow-2xl anim-pop text-slate-950 flex items-center justify-center gap-2 border border-black/10 text-center"
+          className={`fixed md:bottom-8 left-1/2 -translate-x-1/2 z-50 max-w-[calc(100vw-24px)] px-4 sm:px-5 py-3 rounded-2xl font-black text-xs shadow-2xl anim-pop text-slate-950 flex items-center justify-center gap-2 border border-black/10 text-center ${
+            activeStripAd ? "bottom-32" : "bottom-20"
+          }`}
           style={{ backgroundColor: "var(--accent)" }}
         >
           <CheckCircle2 size={16} className="shrink-0" />

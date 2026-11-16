@@ -89,6 +89,7 @@ export interface IUserRepo {
   updateApproval(id: string, status: ApprovalStatus, note?: string): Promise<void>;
   suspendUser(id: string, isSuspended: boolean): Promise<void>;
   setRole(id: string, role: UserRole): Promise<void>;
+  requestMerchantUpgrade(id: string, data?: { phone?: string; municipality?: string; bairro?: string }): Promise<User>;
   setPlan(id: string, planType: PlanType, durationDays?: number): Promise<void>;
   deleteAccount(id: string): Promise<void>;
 }
@@ -125,6 +126,7 @@ export interface IAdRepo {
   getAll(includeAll?: boolean): Promise<SponsoredAd[]>;
   getActiveByPosition(position: AdPosition): Promise<SponsoredAd[]>;
   create(ad: Partial<SponsoredAd>): Promise<SponsoredAd>;
+  update(id: string, updates: Partial<SponsoredAd>): Promise<SponsoredAd>;
   updateStatus(id: string, status: SponsoredAd["status"], active: boolean): Promise<void>;
   trackView(id: string): Promise<void>;
   trackClick(id: string): Promise<void>;

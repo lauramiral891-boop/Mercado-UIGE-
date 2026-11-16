@@ -35,6 +35,10 @@ const MIGRATION_V6_PATH = path.resolve(
   import.meta.dirname,
   "../../../../../supabase/migrations/20250106_password_auth_media_and_paid_ads.sql"
 );
+const MIGRATION_V7_PATH = path.resolve(
+  import.meta.dirname,
+  "../../../../../supabase/migrations/20250107_ads_bottom_nav_and_video_20mb.sql"
+);
 
 /**
  * Simula em memória a lógica exacta dos triggers SQL da migração 20250105 para validar
@@ -605,5 +609,21 @@ describe("Migração 20250105 — Bloqueios Admin, Papéis de Equipa e Centro de
     expect(sqlV6).toContain("Leitura de anúncios pagos ou próprios ou admin");
     expect(sqlV6).toContain("file_size_limit = 5242880");
     expect(sqlV6).toContain("video/mp4");
+  });
+
+  it("11. Migração 20250107 suporta anúncios plataforma/externo/loja, destinos seguros https://, pagamentos externos, Quero vender e Storage 20 MB", () => {
+    const sqlV7 = fs.readFileSync(MIGRATION_V7_PATH, "utf-8");
+
+    expect(sqlV7).toContain("ADD COLUMN IF NOT EXISTS tipo_anunciante");
+    expect(sqlV7).toContain("ADD COLUMN IF NOT EXISTS nome_anunciante TEXT");
+    expect(sqlV7).toContain("ADD COLUMN IF NOT EXISTS tipo_destino");
+    expect(sqlV7).toContain("ADD COLUMN IF NOT EXISTS destino_valor TEXT");
+    expect(sqlV7).toContain("CHECK (posicao IN ('topo', 'faixa', 'categoria', 'pesquisa', 'ecra_inteiro'))");
+    expect(sqlV7).toContain("CREATE OR REPLACE FUNCTION public.is_safe_ad_destination");
+    expect(sqlV7).toContain("^https://");
+    expect(sqlV7).toContain("Leitura de anúncios pagos, plataforma, externos ou admin");
+    expect(sqlV7).toContain("CHECK (tipo IN ('plano', 'anuncio', 'anuncio_externo'))");
+    expect(sqlV7).toContain("CREATE OR REPLACE FUNCTION public.request_merchant_upgrade");
+    expect(sqlV7).toContain("file_size_limit = 20971520");
   });
 });

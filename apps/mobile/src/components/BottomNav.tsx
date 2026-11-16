@@ -1,28 +1,33 @@
 import React from "react";
-import { Home, LayoutGrid, Search, ShoppingCart, User as UserIcon } from "lucide-react";
+import { Home, LayoutGrid, Plus, ShoppingCart, User as UserIcon } from "lucide-react";
 
 interface BottomNavProps {
   activeView: string;
   onSelectNav: (view: string) => void;
   cartCount: number;
+  embedded?: boolean;
 }
 
 export const BottomNav: React.FC<BottomNavProps> = ({
   activeView,
   onSelectNav,
   cartCount,
+  embedded = false,
 }) => {
   const navItems = [
     { id: "home", label: "Início", icon: Home },
     { id: "categories", label: "Categorias", icon: LayoutGrid },
-    { id: "search", label: "Pesquisa", icon: Search },
+    { id: "publish", label: "Publicar", icon: Plus },
     { id: "cart", label: "Carrinho", icon: ShoppingCart, isCart: true },
     { id: "profile", label: "Conta", icon: UserIcon },
   ];
 
   return (
     <nav
-      className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t backdrop-blur-xl transition-colors duration-200 pb-safe"
+      data-testid="mobile-bottom-nav"
+      className={`${
+        embedded ? "w-full" : "md:hidden fixed bottom-0 inset-x-0 z-40"
+      } border-t backdrop-blur-xl transition-colors duration-200 pb-safe pointer-events-auto`}
       style={{
         backgroundColor: "var(--nav-bg)",
         borderColor: "var(--border)",
@@ -45,7 +50,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
               key={item.id}
               type="button"
               onClick={() => onSelectNav(item.id)}
-              className="flex flex-col items-center justify-center h-full min-h-[44px] py-1 relative cursor-pointer active:scale-95 transition-transform"
+              className="flex flex-col items-center justify-center h-full min-h-[44px] py-1 px-0.5 relative cursor-pointer active:scale-95 transition-transform min-w-0"
               title={item.isCart ? "Ver Carrinho de Compras" : item.label}
               aria-label={item.isCart && cartCount > 0 ? `${item.label} (${cartCount})` : item.label}
             >
@@ -70,7 +75,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
                 )}
               </div>
               <span
-                className="text-[10px] font-bold mt-1 transition-colors leading-none"
+                className="text-[10px] font-bold mt-1 transition-colors leading-none truncate max-w-full"
                 style={{
                   color: isActive ? "var(--accent)" : "var(--text-secondary)",
                 }}

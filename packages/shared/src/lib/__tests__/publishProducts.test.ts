@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   canMerchantPublishFloating,
+  resolvePublishAction,
   validateVideoConstraints,
   MAX_VIDEO_DURATION_SEC,
   MAX_VIDEO_BYTES,
@@ -50,7 +51,7 @@ describe("FASE 2 — Publicação de Artigos (+ Publicar, Vídeo e Moderação)"
     };
   });
 
-  it("botão flutuante + Publicar só aparece para comerciantes aprovados", () => {
+  it("botão Publicar na barra encaminha conforme perfil: login, Quero vender ou formulário", () => {
     expect(canMerchantPublishFloating(null)).toBe(false);
     expect(canMerchantPublishFloating({ ...APPROVED_MERCHANT, role: "cliente" })).toBe(false);
     expect(canMerchantPublishFloating({ ...APPROVED_MERCHANT, role: "entregador" })).toBe(false);
@@ -61,9 +62,14 @@ describe("FASE 2 — Publicação de Artigos (+ Publicar, Vídeo e Moderação)"
 
     expect(canMerchantPublishFloating(APPROVED_MERCHANT, APPROVED_STORE)).toBe(true);
     expect(canMerchantPublishFloating(APPROVED_MERCHANT, null)).toBe(true);
+
+    expect(resolvePublishAction(null)).toBe("login");
+    expect(resolvePublishAction({ ...APPROVED_MERCHANT, role: "cliente" })).toBe("want_to_sell");
+    expect(resolvePublishAction({ ...APPROVED_MERCHANT, isApproved: false })).toBe("want_to_sell");
+    expect(resolvePublishAction(APPROVED_MERCHANT, APPROVED_STORE)).toBe("publish");
   });
 
-  it("valida estritamente limites de vídeo: máximo 15 s e 5 MB", () => {
+  it("valida estritamente limites de vídeo de artigos: máximo 15 s e 10 MB", () => {
     expect(validateVideoConstraints(MAX_VIDEO_DURATION_SEC, MAX_VIDEO_BYTES)).toEqual({ ok: true });
     expect(validateVideoConstraints(8.5, 2 * 1024 * 1024)).toEqual({ ok: true });
 
@@ -73,7 +79,7 @@ describe("FASE 2 — Publicação de Artigos (+ Publicar, Vídeo e Moderação)"
 
     const tooHeavy = validateVideoConstraints(10, MAX_VIDEO_BYTES + 1);
     expect(tooHeavy.ok).toBe(false);
-    expect(tooHeavy.error).toContain("5 MB");
+    expect(tooHeavy.error).toContain("10 MB");
 
     expect(validateVideoConstraints(0, 1024).ok).toBe(false);
   });
