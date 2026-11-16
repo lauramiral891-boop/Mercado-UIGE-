@@ -44,6 +44,9 @@ describe("Utilitários de formatação e mensagens em pt-AO", () => {
       "O código expirou. Pede um novo código."
     );
     expect(translateErrorMessage({ message: "Invalid login credentials" })).toBe(
+      "E-mail ou palavra-passe incorretos."
+    );
+    expect(translateErrorMessage({ message: "Invalid OTP token" })).toBe(
       "Código inválido ou incorreto. Verifica e tenta novamente."
     );
     expect(translateErrorMessage({ message: "new row violates row-level security policy" })).toBe(

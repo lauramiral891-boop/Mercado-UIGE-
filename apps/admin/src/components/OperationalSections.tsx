@@ -2,11 +2,14 @@ import React, { useMemo, useState } from "react";
 import {
   Crown,
   Eye,
+  Film,
+  Image as ImageIcon,
   MousePointerClick,
   Plus,
   Store as StoreIcon,
   Truck,
   CheckCircle2,
+  Upload,
 } from "lucide-react";
 import {
   AdPosition,
@@ -18,6 +21,8 @@ import {
   SponsoredAd,
   Store,
   User,
+  compressImage,
+  compressVideoOnDevice,
   fmtDate,
   fmtDateTime,
   fmtKz,
@@ -26,6 +31,10 @@ import {
   formatUserRole,
   isFinanceRole,
   isModeratorRole,
+  isSupabaseConfigured,
+  storeHasActivePaidPlan,
+  translateErrorMessage,
+  uploadMediaFile,
 } from "@mercado-uige/shared";
 import { PaginationBar, TableToolbar } from "./TableControls";
 import { downloadCsv } from "../lib/adminHelpers";
@@ -825,20 +834,42 @@ export const PaymentsSection: React.FC<{
 };
 
 /* -------------------------------------------------------------------------- */
-/* 4. ANÚNCIOS                                                                */
+/* 4. ANÚNCIOS (IMAGEM OU VÍDEO — SÓ LOJAS COM PLANO PAGO ACTIVO)             */
 /* -------------------------------------------------------------------------- */
 export const AdsSection: React.FC<{
   ads: SponsoredAd[];
   stores: Store[];
-  onCreateAd: (payload: { title: string; subtitle: string; storeId: string; position: AdPosition; days: number }) => Promise<void>;
+  onCreateAd: (payload: {
+    title: string;
+    subtitle: string;
+    storeId: string;
+    position: AdPosition;
+    mediaType: "imagem" | "video";
+    imageUrl: string;
+    videoUrl?: string;
+    startDate: string;
+    endDate: string;
+  }) => Promise<void>;
   onToggleAd: (ad: SponsoredAd, nextActive: boolean) => void;
   onDeleteAd: (ad: SponsoredAd) => void;
 }> = ({ ads, stores, onCreateAd, onToggleAd, onDeleteAd }) => {
+  const todayIso = () => new Date().toISOString().slice(0, 10);
+  const plusDaysIso = (d: number) => new Date(Date.now() + d * 86400000).toISOString().slice(0, 10);
+
+  const paidStores = useMemo(() => stores.filter((s) => storeHasActivePaidPlan(s)), [stores]);
+
   const [title, setTitle] = useState("");
   const [subtitle, setSubtitle] = useState("");
   const [storeId, setStoreId] = useState("");
   const [position, setPosition] = useState<AdPosition>("topo");
-  const [days, setDays] = useState("15");
+  const [mediaType, setMediaType] = useState<"imagem" | "video">("imagem");
+  const [imageUrl, setImageUrl] = useState("");
+  const [videoUrl, setVideoUrl] = useState("");
+  const [startDate, setStartDate] = useState(todayIso);
+  const [endDate, setEndDate] = useState(() => plusDaysIso(15));
+  const [uploadingMedia, setUploadingMedia] = useState(false);
+  const [mediaError, setMediaError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   const [search, setSearch] = useState("");
   const [posFilter, setPosFilter] = useState("todos");
@@ -861,84 +892,265 @@ export const AdsSection: React.FC<{
 
   const paged = useMemo(() => filtered.slice((page - 1) * pageSize, page * pageSize), [filtered, page, pageSize]);
 
+  const handleUploadAdImage = async (file: File) => {
+    setMediaError("");
+    setUploadingMedia(true);
+    try {
+      const { blob, dataUrl } = await compressImage(file);
+      if (isSupabaseConfigured && navigator.onLine) {
+        const res = await uploadMediaFile(blob, file.name || `ad_${Date.now()}.jpg`, "anuncios");
+        if (res.error) throw res.error;
+        setImageUrl(res.url || dataUrl);
+      } else {
+        setImageUrl(dataUrl);
+      }
+    } catch (err: unknown) {
+      setMediaError(translateErrorMessage(err, "Não foi possível carregar a imagem do anúncio."));
+    } finally {
+      setUploadingMedia(false);
+    }
+  };
+
+  const handleUploadAdVideo = async (file: File) => {
+    setMediaError("");
+    setUploadingMedia(true);
+    try {
+      const { blob, previewUrl } = await compressVideoOnDevice(file);
+      if (isSupabaseConfigured && navigator.onLine) {
+        const res = await uploadMediaFile(blob, `ad_video_${Date.now()}.webm`, "anuncios");
+        if (res.error) throw res.error;
+        setVideoUrl(res.url || previewUrl);
+      } else {
+        setVideoUrl(previewUrl);
+      }
+    } catch (err: unknown) {
+      setMediaError(translateErrorMessage(err, "Não foi possível processar o vídeo (máx. 15 s e 5 MB)."));
+    } finally {
+      setUploadingMedia(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setMediaError("");
     if (!title.trim()) return;
-    await onCreateAd({
-      title: title.trim(),
-      subtitle: subtitle.trim(),
-      storeId,
-      position,
-      days: Math.max(1, Number(days || 15)),
-    });
-    setTitle("");
-    setSubtitle("");
+    if (!storeId) {
+      setMediaError("Seleciona uma loja com plano pago activo.");
+      return;
+    }
+    if (mediaType === "video" && !videoUrl.trim()) {
+      setMediaError("Carrega ou cola o link do vídeo promocional (máx. 15 s).");
+      return;
+    }
+    if (new Date(endDate).getTime() < new Date(startDate).getTime()) {
+      setMediaError("A data de fim deve ser igual ou posterior à data de início.");
+      return;
+    }
+
+    const selectedStore = paidStores.find((s) => s.id === storeId);
+    const resolvedImage = imageUrl.trim() || selectedStore?.facadeImage || selectedStore?.logo || "";
+
+    setSubmitting(true);
+    try {
+      await onCreateAd({
+        title: title.trim(),
+        subtitle: subtitle.trim(),
+        storeId,
+        position,
+        mediaType,
+        imageUrl: resolvedImage,
+        videoUrl: mediaType === "video" ? videoUrl.trim() : undefined,
+        startDate: new Date(`${startDate}T00:00:00`).toISOString(),
+        endDate: new Date(`${endDate}T23:59:59`).toISOString(),
+      });
+      setTitle("");
+      setSubtitle("");
+      setImageUrl("");
+      setVideoUrl("");
+    } catch (err: unknown) {
+      setMediaError(translateErrorMessage(err, "Não foi possível criar o anúncio."));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
     <div className="space-y-4 anim-fadeUp">
       <form
         onSubmit={handleSubmit}
-        className="p-4 rounded-2xl bg-[#172338] border border-[#26354B] grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs"
+        className="p-4 rounded-2xl bg-[#172338] border border-[#26354B] space-y-3 text-xs"
       >
-        <input
-          type="text"
-          required
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder="Título da campanha *"
-          className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-        />
-        <input
-          type="text"
-          value={subtitle}
-          onChange={(e) => setSubtitle(e.target.value)}
-          placeholder="Subtítulo promocional"
-          className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-        />
-        <select
-          value={storeId}
-          onChange={(e) => setStoreId(e.target.value)}
-          className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-        >
-          <option value="">Selecionar loja</option>
-          {stores.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name} ({s.code || "LJ"})
-            </option>
-          ))}
-        </select>
-        <select
-          value={position}
-          onChange={(e) => setPosition(e.target.value as AdPosition)}
-          className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-        >
-          <option value="topo">Posição: Topo</option>
-          <option value="categoria">Posição: Categoria</option>
-          <option value="pesquisa">Posição: Pesquisa</option>
-        </select>
-        <div className="flex gap-2">
-          <input
-            type="number"
-            min="1"
-            max="180"
-            value={days}
-            onChange={(e) => setDays(e.target.value)}
-            className="w-20 p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-            title="Dias de duração"
-          />
-          <button
-            type="submit"
-            className="flex-1 px-3 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
-          >
-            <Plus size={14} /> Publicar
-          </button>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="font-black text-sm text-white">Novo Anúncio Patrocinado</h3>
+            <p className="text-[11px] text-[#A6B2C5]">
+              Apenas lojas aprovadas com plano pago activo (Básico ou VIP) aparecem para patrocínio.
+            </p>
+          </div>
+          <div className="flex gap-1.5">
+            <button
+              type="button"
+              onClick={() => setMediaType("imagem")}
+              className={`px-3 py-1.5 rounded-lg font-bold inline-flex items-center gap-1.5 cursor-pointer ${
+                mediaType === "imagem" ? "bg-[#246BFD] text-white" : "bg-[#111D30] text-[#A6B2C5] border border-[#26354B]"
+              }`}
+            >
+              <ImageIcon size={13} /> Imagem
+            </button>
+            <button
+              type="button"
+              onClick={() => setMediaType("video")}
+              className={`px-3 py-1.5 rounded-lg font-bold inline-flex items-center gap-1.5 cursor-pointer ${
+                mediaType === "video" ? "bg-[#246BFD] text-white" : "bg-[#111D30] text-[#A6B2C5] border border-[#26354B]"
+              }`}
+            >
+              <Film size={13} /> Vídeo
+            </button>
+          </div>
         </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <input
+            type="text"
+            required
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Título da campanha *"
+            className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+          />
+          <input
+            type="text"
+            value={subtitle}
+            onChange={(e) => setSubtitle(e.target.value)}
+            placeholder="Subtítulo promocional"
+            className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+          />
+          <select
+            required
+            value={storeId}
+            onChange={(e) => setStoreId(e.target.value)}
+            className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+          >
+            <option value="">
+              {paidStores.length === 0 ? "Sem lojas com plano pago activo" : "Selecionar loja (plano pago) *"}
+            </option>
+            {paidStores.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name} ({s.code || "LJ"} · {formatPlanType(s.planType)})
+              </option>
+            ))}
+          </select>
+          <select
+            value={position}
+            onChange={(e) => setPosition(e.target.value as AdPosition)}
+            className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+          >
+            <option value="topo">Posição: Topo</option>
+            <option value="categoria">Posição: Categoria</option>
+            <option value="pesquisa">Posição: Pesquisa</option>
+          </select>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
+          <div>
+            <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">Data de início</label>
+            <input
+              type="date"
+              required
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">Data de fim</label>
+            <input
+              type="date"
+              required
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+            />
+          </div>
+
+          <div className="flex gap-2 items-center">
+            <input
+              type="text"
+              value={imageUrl}
+              onChange={(e) => setImageUrl(e.target.value)}
+              placeholder={mediaType === "video" ? "Capa/poster (opcional)" : "URL ou carregar imagem"}
+              className="flex-1 min-w-0 p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+            />
+            <label className="px-3 py-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-[#B7F34A] font-bold cursor-pointer inline-flex items-center gap-1 shrink-0">
+              <Upload size={13} /> Foto
+              <input
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) handleUploadAdImage(f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+          </div>
+
+          {mediaType === "video" ? (
+            <div className="flex gap-2 items-center">
+              <input
+                type="text"
+                value={videoUrl}
+                onChange={(e) => setVideoUrl(e.target.value)}
+                placeholder="URL do vídeo (ou carrega mp4/webm)"
+                className="flex-1 min-w-0 p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+              />
+              <label className="px-3 py-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-[#B7F34A] font-bold cursor-pointer inline-flex items-center gap-1 shrink-0">
+                <Film size={13} /> Vídeo
+                <input
+                  type="file"
+                  accept="video/mp4,video/webm,video/quicktime"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleUploadAdVideo(f);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+            </div>
+          ) : (
+            <button
+              type="submit"
+              disabled={submitting || uploadingMedia || paidStores.length === 0}
+              className="w-full px-4 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <Plus size={14} /> {uploadingMedia ? "A carregar…" : "Publicar Anúncio"}
+            </button>
+          )}
+        </div>
+
+        {mediaType === "video" && (
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+            <span className="text-[11px] text-[#A6B2C5]">
+              Em vídeo: autoplay sem som com controlo de som; em dados móveis exibe só a foto com botão reproduzir.
+            </span>
+            <button
+              type="submit"
+              disabled={submitting || uploadingMedia || paidStores.length === 0}
+              className="px-4 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <Plus size={14} /> {uploadingMedia ? "A processar vídeo…" : "Publicar Anúncio em Vídeo"}
+            </button>
+          </div>
+        )}
+
+        {mediaError && <p className="text-red-400 font-bold text-xs">{mediaError}</p>}
       </form>
 
       <TableToolbar
         title="Anúncios Patrocinados"
-        subtitle="Controlo de visualizações, cliques e prazo das campanhas."
+        subtitle="Controlo de visualizações, cliques, mídia (imagem/vídeo) e prazo das campanhas."
         search={search}
         onSearchChange={(v) => {
           setSearch(v);
@@ -959,8 +1171,18 @@ export const AdsSection: React.FC<{
         onExportCsv={() =>
           downloadCsv(
             "anuncios-mercado-uige",
-            ["Título", "Loja", "Posição", "Visualizações", "Cliques", "Estado", "Válido até"],
-            filtered.map((a) => [a.title, a.storeName || "", a.position, a.views, a.clicks, a.active ? "Activo" : a.status, fmtDate(a.endDate)])
+            ["Título", "Loja", "Mídia", "Posição", "Visualizações", "Cliques", "Estado", "Início", "Fim"],
+            filtered.map((a) => [
+              a.title,
+              a.storeName || "",
+              a.mediaType === "video" ? "Vídeo" : "Imagem",
+              a.position,
+              a.views,
+              a.clicks,
+              a.active ? "Activo" : a.status,
+              fmtDate(a.startDate),
+              fmtDate(a.endDate),
+            ])
           )
         }
         totalFiltered={filtered.length}
@@ -978,9 +1200,9 @@ export const AdsSection: React.FC<{
                 <thead className="bg-[#111D30] text-[#A6B2C5] uppercase font-bold">
                   <tr>
                     <th className="p-3.5">Campanha</th>
-                    <th className="p-3.5">Posição</th>
+                    <th className="p-3.5">Mídia / Posição</th>
                     <th className="p-3.5">Métricas</th>
-                    <th className="p-3.5">Validade</th>
+                    <th className="p-3.5">Datas</th>
                     <th className="p-3.5">Estado</th>
                     <th className="p-3.5 text-right">Acções</th>
                   </tr>
@@ -992,7 +1214,15 @@ export const AdsSection: React.FC<{
                         <span className="font-bold text-white block">{ad.title}</span>
                         <span className="text-[#A6B2C5]">{ad.storeName || "Campanha Provincial"}</span>
                       </td>
-                      <td className="p-3.5 uppercase font-black text-[#246BFD]">{ad.position}</td>
+                      <td className="p-3.5">
+                        <div className="flex items-center gap-1.5">
+                          <span className="px-2 py-0.5 rounded bg-[#111D30] border border-[#26354B] text-[10px] font-bold text-slate-200 inline-flex items-center gap-1">
+                            {ad.mediaType === "video" ? <Film size={11} className="text-[#B7F34A]" /> : <ImageIcon size={11} className="text-[#246BFD]" />}
+                            {ad.mediaType === "video" ? "Vídeo" : "Imagem"}
+                          </span>
+                          <span className="uppercase font-black text-[#246BFD]">{ad.position}</span>
+                        </div>
+                      </td>
                       <td className="p-3.5 text-[#A6B2C5] tabular-nums">
                         <span className="inline-flex items-center gap-1 mr-3">
                           <Eye size={13} /> {ad.views}
@@ -1001,7 +1231,9 @@ export const AdsSection: React.FC<{
                           <MousePointerClick size={13} /> {ad.clicks}
                         </span>
                       </td>
-                      <td className="p-3.5 text-[#A6B2C5] whitespace-nowrap">{fmtDate(ad.endDate)}</td>
+                      <td className="p-3.5 text-[#A6B2C5] whitespace-nowrap">
+                        {fmtDate(ad.startDate)} → {fmtDate(ad.endDate)}
+                      </td>
                       <td className="p-3.5 whitespace-nowrap">
                         <span
                           className={`px-2 py-0.5 rounded text-[10px] font-black capitalize ${
@@ -1045,12 +1277,16 @@ export const AdsSection: React.FC<{
           <div className="md:hidden space-y-3">
             {paged.map((ad) => (
               <div key={ad.id} className="p-4 rounded-2xl bg-[#172338] border border-[#26354B] space-y-2 text-xs">
-                <div className="flex items-start justify-between">
+                <div className="flex items-start justify-between gap-2">
                   <div>
                     <span className="font-bold text-white block">{ad.title}</span>
-                    <span className="text-[#A6B2C5]">{ad.storeName || "Campanha"} · {ad.position}</span>
+                    <span className="text-[#A6B2C5]">
+                      {ad.storeName || "Campanha"} · {ad.mediaType === "video" ? "Vídeo" : "Imagem"} · {ad.position}
+                    </span>
                   </div>
-                  <span className="text-[11px] text-[#A6B2C5]">{fmtDate(ad.endDate)}</span>
+                  <span className="text-[11px] text-[#A6B2C5] shrink-0">
+                    {fmtDate(ad.startDate)} → {fmtDate(ad.endDate)}
+                  </span>
                 </div>
                 <div className="flex gap-4 text-[#A6B2C5] tabular-nums">
                   <span>{ad.views} vistas</span>

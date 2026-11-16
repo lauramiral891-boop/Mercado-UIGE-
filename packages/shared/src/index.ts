@@ -2,6 +2,8 @@ export * from "./types";
 export * from "./lib/utils";
 export * from "./lib/supabase";
 export * from "./lib/imageCompression";
+export * from "./lib/mediaCompression";
+export * from "./lib/adDelivery";
 export * from "./lib/nativePlugins";
 export * from "./lib/storage";
 export * from "./lib/observability";

@@ -14,6 +14,7 @@ import {
   Minus,
   ShieldCheck,
   Truck,
+  Video,
 } from "lucide-react";
 import { Product, fmtKz, formatStoreType, nativePlugins, SafeImage } from "@mercado-uige/shared";
 
@@ -47,6 +48,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
   const [qty, setQty] = useState(1);
   const [selectedVariant, setSelectedVariant] = useState("");
   const [activeImage, setActiveImage] = useState("");
+  const [showVideo, setShowVideo] = useState(false);
   const [chatMessage, setChatMessage] = useState("");
   const [showReportInput, setShowReportInput] = useState(false);
   const [reportReason, setReportReason] = useState("");
@@ -57,6 +59,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
       setQty(1);
       setSelectedVariant(product.variants && product.variants.length > 0 ? product.variants[0] : "");
       setActiveImage(product.image || product.images?.[0] || "");
+      setShowVideo(Boolean(product.videoUrl && product.mediaType === "video"));
       setChatMessage("");
       setShowReportInput(false);
       setReportReason("");
@@ -169,12 +172,24 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
               className="relative aspect-square w-full rounded-2xl overflow-hidden border bg-slate-900/50"
               style={{ borderColor: "var(--border)" }}
             >
-              <SafeImage
-                src={activeImage}
-                alt={product.name}
-                className="w-full h-full object-cover"
-                fallbackText="Sem fotografia disponível"
-              />
+              {showVideo && product.videoUrl ? (
+                <video
+                  src={product.videoUrl}
+                  controls
+                  autoPlay
+                  muted
+                  playsInline
+                  loop
+                  className="w-full h-full object-cover bg-black"
+                />
+              ) : (
+                <SafeImage
+                  src={activeImage}
+                  alt={product.name}
+                  className="w-full h-full object-cover"
+                  fallbackText="Sem fotografia disponível"
+                />
+              )}
 
               <div className="absolute top-3 left-3 right-14 flex flex-wrap gap-1.5 z-10 pointer-events-none">
                 {product.discount > 0 && (
@@ -210,16 +225,31 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
               </button>
             </div>
 
-            {/* Thumbnail selector */}
-            {gallery.length > 1 && (
+            {/* Thumbnail & Video selector */}
+            {(gallery.length > 1 || product.videoUrl) && (
               <div className="flex gap-2 overflow-x-auto no-scrollbar">
+                {product.videoUrl && (
+                  <button
+                    type="button"
+                    onClick={() => setShowVideo(true)}
+                    className={`w-14 h-14 sm:w-16 sm:h-16 rounded-xl overflow-hidden border-2 shrink-0 cursor-pointer bg-slate-900 text-white grid place-items-center ${
+                      showVideo ? "border-[#B7F34A]" : "border-transparent opacity-70"
+                    }`}
+                    aria-label="Ver vídeo do artigo"
+                  >
+                    <Video size={20} className="text-[#B7F34A]" />
+                  </button>
+                )}
                 {gallery.map((img, idx) => (
                   <button
                     key={idx}
                     type="button"
-                    onClick={() => setActiveImage(img)}
+                    onClick={() => {
+                      setShowVideo(false);
+                      setActiveImage(img);
+                    }}
                     className={`w-14 h-14 sm:w-16 sm:h-16 rounded-xl overflow-hidden border-2 shrink-0 cursor-pointer ${
-                      activeImage === img ? "border-[#246BFD]" : "border-transparent opacity-60"
+                      !showVideo && activeImage === img ? "border-[#246BFD]" : "border-transparent opacity-60"
                     }`}
                   >
                     <SafeImage src={img} alt={`${product.name} (${idx + 1})`} className="w-full h-full object-cover" />

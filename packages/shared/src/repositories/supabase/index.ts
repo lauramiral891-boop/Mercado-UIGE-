@@ -5,8 +5,10 @@ import {
   saveCurrentUser,
   saveSystemConfig,
   saveAds,
+  getStoredStores,
 } from "../../lib/storage";
 import { smartSearch, generateDeliveryCode } from "../../lib/utils";
+import { isAdEligibleForPaidStore } from "../../lib/adDelivery";
 import {
   Product,
   Store,
@@ -110,6 +112,8 @@ function mapProductRow(row: any): Product {
     condition: row.condicao === "usado" ? "usado" : "novo",
     image: row.imagem_url || "",
     images: row.imagens || [],
+    videoUrl: row.video_url || null,
+    mediaType: row.tipo_media === "video" || row.video_url ? "video" : "imagem",
     province: row.provincia || "Uíge",
     municipality: row.municipio || "Uíge",
     bairro: row.bairro,
@@ -228,6 +232,8 @@ export class SupabaseProductRepo implements IProductRepo {
           condicao: product.condition || "novo",
           imagem_url: product.image || "",
           imagens: product.images || [],
+          video_url: product.videoUrl || null,
+          tipo_media: product.mediaType || (product.videoUrl ? "video" : "imagem"),
           municipio: product.municipality || "Uíge",
         })
         .select("*, lojas(nome, codigo, tipo_loja, classificacao, is_vip)")
@@ -1047,16 +1053,28 @@ export class SupabaseReportRepo implements IReportRepo {
 // 8. SUPABASE ANÚNCIOS PATROCINADOS
 export class SupabaseAdRepo implements IAdRepo {
   private mapAdRow(a: any): SponsoredAd {
+    const mediaType: "imagem" | "video" =
+      a.tipo_media === "video" || (Boolean(a.video_url) && a.tipo_media !== "imagem")
+        ? "video"
+        : "imagem";
+
     return {
       id: a.id,
       storeId: a.loja_id,
       sellerId: a.vendedor_id,
       productId: a.produto_id,
       storeName: a.lojas?.nome || undefined,
+      storePlanType: a.lojas?.plano_tipo || undefined,
+      storePlanExpiresAt: a.lojas?.plano_expira_em ?? null,
+      storeIsApproved: a.lojas?.is_aprovada ?? undefined,
+      storeIsSuspended: a.lojas?.suspensa ?? undefined,
+      storeImage: a.lojas?.foto_fachada_url || a.lojas?.logo_url || undefined,
       productName: a.produtos?.nome || undefined,
       title: a.titulo,
       subtitle: a.subtitulo || "",
-      imageUrl: a.imagem_url || "",
+      imageUrl: a.imagem_url || a.lojas?.foto_fachada_url || a.lojas?.logo_url || "",
+      videoUrl: a.video_url || null,
+      mediaType,
       position: a.posicao || "topo",
       startDate: a.data_inicio,
       endDate: a.data_fim,
@@ -1073,19 +1091,21 @@ export class SupabaseAdRepo implements IAdRepo {
     try {
       const { data, error } = await supabase
         .from("anuncios")
-        .select("*, lojas(nome), produtos(nome)")
+        .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
         .order("criado_em", { ascending: false });
       if (error || !data) return fallbackAdRepo.getAll(includeAll);
       const mapped = data.map((a) => this.mapAdRow(a));
       saveAds(mapped);
       if (includeAll) return mapped;
       const now = Date.now();
+      const cachedStores = getStoredStores();
       return mapped.filter(
         (a) =>
           a.active &&
           a.status === "aprovado" &&
           new Date(a.startDate).getTime() <= now &&
-          new Date(a.endDate).getTime() >= now
+          new Date(a.endDate).getTime() >= now &&
+          isAdEligibleForPaidStore(a, cachedStores, now)
       );
     } catch {
       return fallbackAdRepo.getAll(includeAll);
@@ -1099,27 +1119,56 @@ export class SupabaseAdRepo implements IAdRepo {
 
   async create(ad: Partial<SponsoredAd>): Promise<SponsoredAd> {
     if (!isSupabaseConfigured) return fallbackAdRepo.create(ad);
+
+    const mediaType: "imagem" | "video" =
+      ad.mediaType === "video" || (Boolean(ad.videoUrl) && ad.mediaType !== "imagem")
+        ? "video"
+        : "imagem";
+
+    const basePayload = {
+      loja_id: ad.storeId || null,
+      vendedor_id: ad.sellerId,
+      produto_id: ad.productId || null,
+      titulo: ad.title || "Campanha Patrocinada",
+      subtitulo: ad.subtitle || "",
+      imagem_url: ad.imageUrl || null,
+      posicao: ad.position || "topo",
+      data_inicio: ad.startDate || new Date().toISOString(),
+      data_fim: ad.endDate || new Date(Date.now() + 30 * 86400000).toISOString(),
+      ativo: Boolean(ad.active),
+      estado: ad.status || "pendente",
+    };
+
     try {
-      const { data, error } = await supabase
+      let result = await supabase
         .from("anuncios")
         .insert({
-          loja_id: ad.storeId || null,
-          vendedor_id: ad.sellerId,
-          produto_id: ad.productId || null,
-          titulo: ad.title || "Campanha Patrocinada",
-          subtitulo: ad.subtitle || "",
-          imagem_url: ad.imageUrl || null,
-          posicao: ad.position || "topo",
-          data_inicio: ad.startDate || new Date().toISOString(),
-          data_fim: ad.endDate || new Date(Date.now() + 30 * 86400000).toISOString(),
-          ativo: Boolean(ad.active),
-          estado: ad.status || "pendente",
+          ...basePayload,
+          video_url: ad.videoUrl || null,
+          tipo_media: mediaType,
         })
-        .select("*, lojas(nome), produtos(nome)")
+        .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
         .single();
-      if (error || !data) return fallbackAdRepo.create(ad);
-      return this.mapAdRow(data);
-    } catch {
+
+      // Compatibilidade se a migração 20250106 ainda não tiver sido aplicada no SQL Editor
+      if (result.error && (result.error.code === "42703" || result.error.code === "PGRST204")) {
+        result = await supabase
+          .from("anuncios")
+          .insert(basePayload)
+          .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
+          .single();
+      }
+
+      if (result.error) {
+        if (result.error.code === "P0001" || result.error.message?.toLowerCase().includes("plano")) {
+          throw new Error(result.error.message);
+        }
+        return fallbackAdRepo.create(ad);
+      }
+      if (!result.data) return fallbackAdRepo.create(ad);
+      return this.mapAdRow(result.data);
+    } catch (err: any) {
+      if (err?.message?.toLowerCase().includes("plano")) throw err;
       return fallbackAdRepo.create(ad);
     }
   }
@@ -1127,9 +1176,10 @@ export class SupabaseAdRepo implements IAdRepo {
   async updateStatus(id: string, status: SponsoredAd["status"], active: boolean): Promise<void> {
     await fallbackAdRepo.updateStatus(id, status, active);
     if (!isSupabaseConfigured) return;
-    try {
-      await supabase.from("anuncios").update({ estado: status, ativo: active }).eq("id", id);
-    } catch {}
+    const { error } = await supabase.from("anuncios").update({ estado: status, ativo: active }).eq("id", id);
+    if (error && (error.code === "P0001" || error.message?.toLowerCase().includes("plano"))) {
+      throw new Error(error.message);
+    }
   }
 
   async trackView(id: string): Promise<void> {
@@ -1468,6 +1518,7 @@ export class SupabaseSystemConfigRepo implements ISystemConfigRepo {
         ambulantVipPrice: Number(data.preco_plano_ambulante_vip ?? 9000),
         courierBasicPrice: Number(data.preco_plano_entregador_basico ?? 3000),
         courierVipPrice: Number(data.preco_plano_entregador_vip ?? 8000),
+        requireProductApproval: Boolean(data.exigir_aprovacao_produtos ?? false),
         maintenanceMode: Boolean(data.modo_manutencao ?? false),
         maintenanceMessage:
           data.mensagem_manutencao ||
@@ -1501,6 +1552,9 @@ export class SupabaseSystemConfigRepo implements ISystemConfigRepo {
         preco_plano_entregador_vip: merged.courierVipPrice,
         actualizado_em: new Date().toISOString(),
       };
+      if (updates.requireProductApproval !== undefined) {
+        payload.exigir_aprovacao_produtos = Boolean(merged.requireProductApproval);
+      }
       if (updates.maintenanceMode !== undefined) {
         payload.modo_manutencao = Boolean(merged.maintenanceMode);
       }

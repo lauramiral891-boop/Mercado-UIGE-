@@ -119,7 +119,44 @@ export function translateErrorMessage(
     return "Não foi possível enviar o e-mail. Verifica as definições de SMTP no Supabase.";
   }
 
-  if (msg.includes("signups not allowed") || msg.includes("otp_disabled")) {
+  if (
+    msg.includes("invalid login credentials") ||
+    msg.includes("invalid_credentials") ||
+    msg.includes("wrong password")
+  ) {
+    return "E-mail ou palavra-passe incorretos.";
+  }
+
+  if (msg.includes("email not confirmed") || msg.includes("email_not_confirmed")) {
+    return "Conta ainda não confirmada. Introduz o código enviado para o teu e-mail.";
+  }
+
+  if (msg.includes("user already registered") || msg.includes("already been registered") || msg.includes("already registered")) {
+    return "Já existe uma conta registada com este e-mail. Entra com a tua palavra-passe.";
+  }
+
+  if (msg.includes("password should contain at least one character")) {
+    return "A palavra-passe é demasiado fraca. Inclui maiúsculas, minúsculas, números e símbolos (ex.: Mercado@2026).";
+  }
+
+  if (
+    msg.includes("password should be at least") ||
+    msg.includes("weak_password") ||
+    msg.includes("weak password") ||
+    msg.includes("pelo menos 8")
+  ) {
+    return "A palavra-passe deve ter pelo menos 8 caracteres.";
+  }
+
+  if (msg.includes("new password should be different") || msg.includes("same_password")) {
+    return "A nova palavra-passe deve ser diferente da actual.";
+  }
+
+  if (msg.includes("user not found")) {
+    return "Nenhuma conta encontrada com este e-mail.";
+  }
+
+  if (msg.includes("signups not allowed") || msg.includes("otp_disabled") || msg.includes("signup_disabled")) {
     return "Registo temporariamente indisponível. Tenta novamente mais tarde.";
   }
 
@@ -586,3 +623,12 @@ export function buildWhatsAppOrderUrl(params: {
   return { url, phoneDigits, usedFallback, message };
 }
 
+export function validatePasswordPair(password: string, confirmPassword: string): string | null {
+  if (!password || password.length < 8) {
+    return "A palavra-passe deve ter pelo menos 8 caracteres.";
+  }
+  if (password !== confirmPassword) {
+    return "As palavras-passe não coincidem.";
+  }
+  return null;
+}

@@ -68,6 +68,7 @@ import {
   formatUserRole,
   isAnyAdminRole,
   isSuperAdminRole,
+  storeHasActivePaidPlan,
 } from "@mercado-uige/shared";
 import { AdminSection, canAccessAdminSection } from "./lib/adminHelpers";
 import { appendNocHistorySample, OperationTiming } from "./lib/controlCenterHelpers";
@@ -709,6 +710,29 @@ export const AdminApp: React.FC = () => {
     });
   };
 
+  const requestApproveProduct = (product: Product) => {
+    if (!currentUser) return;
+    openConfirm({
+      title: `Aprovar artigo "${product.name}"?`,
+      description: "O artigo passará a ficar imediatamente visível no catálogo provincial para todos os clientes.",
+      confirmLabel: "Aprovar Artigo",
+      tone: "primary",
+      action: async () => {
+        await productRepo.approve(product.id, true);
+        await auditRepo.log(currentUser.id, "APPROVE_PRODUCT", product.name);
+        if (product.sellerId) {
+          await notificationRepo.create({
+            userId: product.sellerId,
+            title: "Artigo aprovado",
+            body: `O teu artigo "${product.name}" foi aprovado e já está visível no catálogo.`,
+            type: "info",
+          });
+        }
+        showToast("Artigo aprovado e publicado.");
+      },
+    });
+  };
+
   const requestDeleteProduct = (product: Product) => {
     if (!currentUser) return;
     openConfirm({
@@ -898,24 +922,38 @@ export const AdminApp: React.FC = () => {
     subtitle: string;
     storeId: string;
     position: AdPosition;
-    days: number;
+    mediaType: "imagem" | "video";
+    imageUrl: string;
+    videoUrl?: string;
+    startDate: string;
+    endDate: string;
   }) => {
     if (!currentUser) return;
     const st = stores.find((s) => s.id === payload.storeId);
+    if (!st || !storeHasActivePaidPlan(st)) {
+      showToast("Apenas lojas com plano pago activo podem ter anúncios patrocinados.");
+      return;
+    }
     await adRepo.create({
-      sellerId: st?.ownerId || currentUser.id,
-      storeId: st?.id,
-      storeName: st?.name || "Mercado Uíge",
+      sellerId: st.ownerId,
+      storeId: st.id,
+      storeName: st.name,
       title: payload.title,
       subtitle: payload.subtitle,
-      imageUrl: st?.facadeImage || st?.logo || "",
+      imageUrl: payload.imageUrl || st.facadeImage || st.logo || "",
+      videoUrl: payload.videoUrl || null,
+      mediaType: payload.mediaType,
       position: payload.position,
-      startDate: new Date().toISOString(),
-      endDate: new Date(Date.now() + payload.days * 86400000).toISOString(),
+      startDate: payload.startDate,
+      endDate: payload.endDate,
       active: true,
       status: "aprovado",
     });
-    await auditRepo.log(currentUser.id, "CREATE_AD", st?.name || "global", { title: payload.title });
+    await auditRepo.log(currentUser.id, "CREATE_AD", st.name, {
+      title: payload.title,
+      mediaType: payload.mediaType,
+      position: payload.position,
+    });
     showToast("Anúncio patrocinado publicado!");
     await loadData();
   };
@@ -1029,6 +1067,7 @@ export const AdminApp: React.FC = () => {
     const pendingAccounts = users.filter(
       (u) => u.isApproved === false && u.role !== "cliente" && u.approvalStatus !== "rejeitado"
     ).length;
+    const pendingProducts = products.filter((p) => p.isApproved === false).length;
     const pendingPayments =
       payments.filter((p) => p.status === "pendente").length +
       courierFees.filter((f) => f.status === "pendente").length;
@@ -1039,7 +1078,7 @@ export const AdminApp: React.FC = () => {
     const openSecurityAlerts = systemEvents.filter((e) => !e.resolved).length;
 
     return {
-      approvals: pendingStores + pendingAccounts,
+      approvals: pendingStores + pendingAccounts + pendingProducts,
       stores: stores.length,
       users: users.length,
       orders: orders.length,
@@ -1050,7 +1089,7 @@ export const AdminApp: React.FC = () => {
       reports: pendingReports,
       securityAlerts: openSecurityAlerts,
     };
-  }, [stores, users, payments, courierFees, reports, deliveries, orders, ads, systemEvents]);
+  }, [stores, users, products, payments, courierFees, reports, deliveries, orders, ads, systemEvents]);
 
   // Ecrã de Login
   if (!currentUser || !isAnyAdminRole(currentUser.role)) {
@@ -1358,10 +1397,13 @@ export const AdminApp: React.FC = () => {
             <ApprovalsSection
               stores={stores}
               users={users}
+              products={products}
               onPreviewImage={setPreviewImageUrl}
               onApprove={requestApproveEntry}
               onReject={requestRejectEntry}
               onRequestCorrection={requestCorrectionEntry}
+              onApproveProduct={requestApproveProduct}
+              onRejectProduct={requestDeleteProduct}
             />
           )}
 

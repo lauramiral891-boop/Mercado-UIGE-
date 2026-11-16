@@ -1,10 +1,12 @@
 import React, { useMemo, useState } from "react";
 import { CheckCircle2, XCircle, AlertCircle, Eye, FileText, Store as StoreIcon, UserCheck } from "lucide-react";
 import {
+  Product,
   Store,
   User,
   SafeImage,
   fmtDateTime,
+  fmtKz,
   formatStoreType,
   formatUserRole,
 } from "@mercado-uige/shared";
@@ -13,7 +15,7 @@ import { downloadCsv } from "../lib/adminHelpers";
 
 interface ApprovalEntry {
   id: string;
-  kind: "loja" | "utilizador";
+  kind: "loja" | "utilizador" | "produto";
   code: string;
   name: string;
   subtitle: string;
@@ -27,24 +29,31 @@ interface ApprovalEntry {
   createdAt: string;
   rawStore?: Store;
   rawUser?: User;
+  rawProduct?: Product;
 }
 
 interface ApprovalsSectionProps {
   stores: Store[];
   users: User[];
+  products?: Product[];
   onPreviewImage: (url: string) => void;
   onApprove: (entry: { kind: "loja" | "utilizador"; store?: Store; user?: User }) => void;
   onReject: (entry: { kind: "loja" | "utilizador"; store?: Store; user?: User }) => void;
   onRequestCorrection: (entry: { kind: "loja" | "utilizador"; store?: Store; user?: User }) => void;
+  onApproveProduct?: (product: Product) => void;
+  onRejectProduct?: (product: Product) => void;
 }
 
 export const ApprovalsSection: React.FC<ApprovalsSectionProps> = ({
   stores,
   users,
+  products = [],
   onPreviewImage,
   onApprove,
   onReject,
   onRequestCorrection,
+  onApproveProduct,
+  onRejectProduct,
 }) => {
   const [search, setSearch] = useState("");
   const [kindFilter, setKindFilter] = useState<string>("todos");
@@ -88,10 +97,26 @@ export const ApprovalsSection: React.FC<ApprovalsSectionProps> = ({
         rawUser: u,
       }));
 
-    return [...storeEntries, ...userEntries].sort(
+    const productEntries: ApprovalEntry[] = products.map((p) => ({
+      id: `prod_${p.id}`,
+      kind: "produto",
+      code: p.storeCode || "ART",
+      name: p.name,
+      subtitle: `${fmtKz(p.price)} · ${p.condition === "usado" ? "Usado" : "Novo"} · ${p.categoryName}`,
+      location: `${p.storeName || "Loja Local"} · ${p.municipality || "Uíge"}`,
+      phone: p.videoUrl ? "Com vídeo" : "Com fotografia",
+      biPhotoUrl: null,
+      facadeImage: p.image || p.images?.[0] || null,
+      approvalStatus: p.isApproved ? "aprovado" : "pendente",
+      note: null,
+      createdAt: p.createdAt,
+      rawProduct: p,
+    }));
+
+    return [...storeEntries, ...userEntries, ...productEntries].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
-  }, [stores, users]);
+  }, [stores, users, products]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -167,9 +192,10 @@ export const ApprovalsSection: React.FC<ApprovalsSectionProps> = ({
           setPage(1);
         }}
         secondFilterOptions={[
-          { value: "todos", label: "Lojas e Contas" },
+          { value: "todos", label: "Lojas, Contas e Artigos" },
           { value: "loja", label: "Apenas Lojas" },
           { value: "utilizador", label: "Apenas Comerciantes / Entregadores" },
+          { value: "produto", label: "Apenas Artigos" },
         ]}
         onExportCsv={handleExport}
         totalFiltered={filtered.length}
@@ -195,7 +221,7 @@ export const ApprovalsSection: React.FC<ApprovalsSectionProps> = ({
                       </span>
                       <span className="px-2 py-0.5 rounded-md bg-[#246BFD]/15 text-[#246BFD] font-bold flex items-center gap-1">
                         {entry.kind === "loja" ? <StoreIcon size={11} /> : <UserCheck size={11} />}
-                        {entry.kind === "loja" ? "Loja" : "Conta"}
+                        {entry.kind === "loja" ? "Loja" : entry.kind === "produto" ? "Artigo" : "Conta"}
                       </span>
                     </div>
                     <h3 className="font-black text-sm text-white mt-1.5 truncate">{entry.name}</h3>
@@ -290,45 +316,66 @@ export const ApprovalsSection: React.FC<ApprovalsSectionProps> = ({
               </div>
 
               <div className="pt-3 border-t border-[#26354B] flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() =>
-                    onApprove({
-                      kind: entry.kind,
-                      store: entry.rawStore,
-                      user: entry.rawUser,
-                    })
-                  }
-                  className="flex-1 px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-                >
-                  <CheckCircle2 size={14} /> Aprovar
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    onRequestCorrection({
-                      kind: entry.kind,
-                      store: entry.rawStore,
-                      user: entry.rawUser,
-                    })
-                  }
-                  className="flex-1 px-3 py-2 rounded-xl bg-[#246BFD]/15 border border-[#246BFD]/40 text-blue-200 hover:bg-[#246BFD] hover:text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-                >
-                  <AlertCircle size={14} /> Pedir correcção
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    onReject({
-                      kind: entry.kind,
-                      store: entry.rawStore,
-                      user: entry.rawUser,
-                    })
-                  }
-                  className="px-3 py-2 rounded-xl bg-red-500/15 border border-red-500/30 text-red-300 hover:bg-red-500 hover:text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-                >
-                  <XCircle size={14} /> Rejeitar
-                </button>
+                {entry.kind === "produto" && entry.rawProduct ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => onApproveProduct?.(entry.rawProduct!)}
+                      className="flex-1 px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <CheckCircle2 size={14} /> Aprovar Artigo
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onRejectProduct?.(entry.rawProduct!)}
+                      className="px-3 py-2 rounded-xl bg-red-500/15 border border-red-500/30 text-red-300 hover:bg-red-500 hover:text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <XCircle size={14} /> Remover
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onApprove({
+                          kind: entry.kind as "loja" | "utilizador",
+                          store: entry.rawStore,
+                          user: entry.rawUser,
+                        })
+                      }
+                      className="flex-1 px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <CheckCircle2 size={14} /> Aprovar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onRequestCorrection({
+                          kind: entry.kind as "loja" | "utilizador",
+                          store: entry.rawStore,
+                          user: entry.rawUser,
+                        })
+                      }
+                      className="flex-1 px-3 py-2 rounded-xl bg-[#246BFD]/15 border border-[#246BFD]/40 text-blue-200 hover:bg-[#246BFD] hover:text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <AlertCircle size={14} /> Pedir correcção
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onReject({
+                          kind: entry.kind as "loja" | "utilizador",
+                          store: entry.rawStore,
+                          user: entry.rawUser,
+                        })
+                      }
+                      className="px-3 py-2 rounded-xl bg-red-500/15 border border-red-500/30 text-red-300 hover:bg-red-500 hover:text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <XCircle size={14} /> Rejeitar
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           ))}

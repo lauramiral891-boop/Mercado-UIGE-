@@ -61,6 +61,10 @@ import {
   recordSearchHistory,
   recordProductClick,
   getLocalPersonalizationSignals,
+  canMerchantPublishFloating,
+  canShowFullscreenAd,
+  isAdEligibleForPaidStore,
+  isEditableElementFocused,
   productRepo,
   orderRepo,
   messageRepo,
@@ -90,6 +94,9 @@ import { LocationModal } from "./components/LocationModal";
 import { AuthModal } from "./components/AuthModal";
 import { ProductDetailModal } from "./components/ProductDetailModal";
 import { PrivacyPolicyModal } from "./components/PrivacyPolicyModal";
+import { PublishProductModal } from "./components/PublishProductModal";
+import { SponsoredMediaView } from "./components/SponsoredMediaView";
+import { FullscreenAdOverlay } from "./components/FullscreenAdOverlay";
 import { CourierView } from "./components/CourierView";
 import { SellerStudioView } from "./components/SellerStudioView";
 
@@ -140,6 +147,7 @@ export const MobileApp: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<"login" | "register">("login");
+  const [publishModalOpen, setPublishModalOpen] = useState(false);
   const [confirmDeleteAccount, setConfirmDeleteAccount] = useState(false);
 
   // Merchant & Courier Extra Data
@@ -193,9 +201,23 @@ export const MobileApp: React.FC = () => {
   });
   const [isListening, setIsListening] = useState(false);
 
-  // Sponsored Ads Carousel Index & View Tracking
+  // Sponsored Ads Carousel, Fullscreen Interstitial & View Tracking
   const [adSlideIdx, setAdSlideIdx] = useState(0);
   const viewedAdsRef = useRef<Set<string>>(new Set());
+  const [fullscreenAd, setFullscreenAd] = useState<SponsoredAd | null>(null);
+  const [fullscreenRotationIdx, setFullscreenRotationIdx] = useState(0);
+  const [activeUsageMs, setActiveUsageMs] = useState(0);
+  const [isTyping, setIsTyping] = useState(false);
+  const [lastFullscreenAdAt, setLastFullscreenAdAt] = useState<number | null>(() => {
+    try {
+      const raw = localStorage.getItem("mu_last_fullscreen_ad_at");
+      if (!raw) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    } catch {
+      return null;
+    }
+  });
 
   // Checkout Form & Post-Checkout WhatsApp Orders
   const [checkoutAddress, setCheckoutAddress] = useState("");
@@ -260,6 +282,10 @@ export const MobileApp: React.FC = () => {
         setAuthModalOpen(false);
         return;
       }
+      if (publishModalOpen) {
+        setPublishModalOpen(false);
+        return;
+      }
       if (viewHistory.length > 1) {
         const nextHistory = [...viewHistory];
         nextHistory.pop();
@@ -270,7 +296,7 @@ export const MobileApp: React.FC = () => {
     });
 
     return cleanup;
-  }, [selectedProduct, showLocationModal, showPrivacyModal, authModalOpen, viewHistory]);
+  }, [selectedProduct, showLocationModal, showPrivacyModal, authModalOpen, publishModalOpen, viewHistory]);
 
   // Automatic Offline Sync Queue flush when online
   useEffect(() => {
@@ -417,12 +443,28 @@ export const MobileApp: React.FC = () => {
 
   useEffect(() => {
     loadData();
+    if (!isSupabaseConfigured) return;
+    const { data: subscriptionData } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
+        loadData();
+      } else if (event === "SIGNED_OUT") {
+        saveCurrentUser(null);
+        setUser(null);
+      }
+    });
+    return () => {
+      subscriptionData?.subscription?.unsubscribe();
+    };
   }, []);
 
-  // Sponsored Ads Carousels & View Tracking
-  const topAds = useMemo(() => ads.filter((a) => a.position === "topo"), [ads]);
-  const categoryAds = useMemo(() => ads.filter((a) => a.position === "categoria"), [ads]);
-  const searchAds = useMemo(() => ads.filter((a) => a.position === "pesquisa"), [ads]);
+  // Sponsored Ads Carousels & View Tracking (só lojas com plano pago activo)
+  const paidEligibleAds = useMemo(
+    () => ads.filter((a) => isAdEligibleForPaidStore(a, stores)),
+    [ads, stores]
+  );
+  const topAds = useMemo(() => paidEligibleAds.filter((a) => a.position === "topo"), [paidEligibleAds]);
+  const categoryAds = useMemo(() => paidEligibleAds.filter((a) => a.position === "categoria"), [paidEligibleAds]);
+  const searchAds = useMemo(() => paidEligibleAds.filter((a) => a.position === "pesquisa"), [paidEligibleAds]);
 
   useEffect(() => {
     if (topAds.length <= 1) return;
@@ -448,9 +490,76 @@ export const MobileApp: React.FC = () => {
     }
   }, [view, adSlideIdx, topAds, categoryAds, searchAds]);
 
-  const handleOpenSponsoredAd = (ad: SponsoredAd) => {
+  // Rastreio de uso activo da app e detecção de digitação para anúncio de ecrã inteiro
+  useEffect(() => {
+    if (!booted) return;
+    const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      if (!fullscreenAd) {
+        setActiveUsageMs((prev) => prev + 1000);
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [booted, fullscreenAd]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const updateTyping = () => setIsTyping(isEditableElementFocused(document));
+    document.addEventListener("focusin", updateTyping);
+    document.addEventListener("focusout", updateTyping);
+    return () => {
+      document.removeEventListener("focusin", updateTyping);
+      document.removeEventListener("focusout", updateTyping);
+    };
+  }, []);
+
+  const anyModalOpenForAds = Boolean(
+    selectedProduct ||
+      authModalOpen ||
+      showLocationModal ||
+      showPrivacyModal ||
+      publishModalOpen ||
+      fullscreenAd
+  );
+
+  useEffect(() => {
+    if (
+      !canShowFullscreenAd({
+        activeUsageMs,
+        nowMs: Date.now(),
+        lastShownAtMs: lastFullscreenAdAt,
+        currentView: view,
+        isModalOpen: anyModalOpenForAds,
+        isTyping,
+        hasEligibleAd: paidEligibleAds.length > 0,
+      })
+    ) {
+      return;
+    }
+
+    const chosen = paidEligibleAds[fullscreenRotationIdx % paidEligibleAds.length];
+    if (!chosen) return;
+    const shownNow = Date.now();
+    setFullscreenAd(chosen);
+    setFullscreenRotationIdx((prev) => prev + 1);
+    setLastFullscreenAdAt(shownNow);
+    try {
+      localStorage.setItem("mu_last_fullscreen_ad_at", String(shownNow));
+    } catch {}
+    adRepo.trackView(chosen.id).catch(() => {});
+  }, [
+    activeUsageMs,
+    lastFullscreenAdAt,
+    view,
+    anyModalOpenForAds,
+    isTyping,
+    paidEligibleAds,
+    fullscreenRotationIdx,
+  ]);
+
+  const handleOpenSponsoredAd = (ad: SponsoredAd, forceOpenStore = false) => {
     adRepo.trackClick(ad.id).catch(() => {});
-    if (ad.productId) {
+    if (!forceOpenStore && ad.productId) {
       const targetProd = products.find((p) => p.id === ad.productId);
       if (targetProd) {
         openProductDetails(targetProd);
@@ -511,19 +620,23 @@ export const MobileApp: React.FC = () => {
     return Array.from(map.values());
   }, [detailedCart, stores]);
 
+  const publicProducts = useMemo(() => {
+    return products.filter((p) => p.isApproved !== false);
+  }, [products]);
+
   const favoriteProducts = useMemo(() => {
     return products.filter((p) => favorites.includes(p.id));
   }, [products, favorites]);
 
   const usedProducts = useMemo(() => {
-    return products.filter((p) => {
+    return publicProducts.filter((p) => {
       if (p.condition !== "usado") return false;
       if (usedStoreTypeFilter !== "todos" && (p.storeType || "loja_fixa") !== usedStoreTypeFilter) {
         return false;
       }
       return true;
     });
-  }, [products, usedStoreTypeFilter]);
+  }, [publicProducts, usedStoreTypeFilter]);
 
   const filteredStores = useMemo(() => {
     if (storeTypeFilter === "todos") return stores;
@@ -534,6 +647,16 @@ export const MobileApp: React.FC = () => {
     if (!user) return null;
     return stores.find((s) => s.ownerId === user.id) || null;
   }, [stores, user]);
+
+  const canShowFloatingPublish =
+    canMerchantPublishFloating(user, myStore) &&
+    view !== "cart" &&
+    !selectedProduct &&
+    !authModalOpen &&
+    !showLocationModal &&
+    !showPrivacyModal &&
+    !publishModalOpen &&
+    !fullscreenAd;
 
   const myProducts = useMemo(() => {
     if (!user) return [];
@@ -607,7 +730,7 @@ export const MobileApp: React.FC = () => {
         availableOnly: activeFilters.available,
         personalization: getLocalPersonalizationSignals(),
       });
-      setSearchResults(results);
+      setSearchResults(results.filter((p) => p.isApproved !== false));
     } catch (err: unknown) {
       showToast(translateErrorMessage(err, "Não foi possível pesquisar agora. Tenta novamente."));
     } finally {
@@ -970,14 +1093,11 @@ export const MobileApp: React.FC = () => {
                       </span>
                     </div>
                   </div>
-                  {currentTopAd.imageUrl && (
-                    <div className="w-full sm:w-48 h-32 rounded-2xl overflow-hidden shrink-0 border border-white/15">
-                      <SafeImage
-                        src={currentTopAd.imageUrl}
-                        alt={currentTopAd.title}
-                        className="w-full h-full object-cover"
-                      />
-                    </div>
+                  {(currentTopAd.imageUrl || currentTopAd.videoUrl || currentTopAd.storeImage) && (
+                    <SponsoredMediaView
+                      ad={currentTopAd}
+                      className="w-full sm:w-52 h-36 rounded-2xl overflow-hidden shrink-0 border border-white/15"
+                    />
                   )}
                 </div>
 
@@ -1106,7 +1226,7 @@ export const MobileApp: React.FC = () => {
             <div>
               <div className="flex items-center justify-between mb-3">
                 <h2 className="font-black text-base sm:text-lg">Artigos no Catálogo</h2>
-                <span className="text-xs font-bold opacity-60">{products.length} artigo(s)</span>
+                <span className="text-xs font-bold opacity-60">{publicProducts.length} artigo(s)</span>
               </div>
 
               {loading ? (
@@ -1115,7 +1235,7 @@ export const MobileApp: React.FC = () => {
                     <div key={i} className="h-64 rounded-3xl bg-slate-800/40 animate-pulse border border-[#26354B]" />
                   ))}
                 </div>
-              ) : products.length === 0 ? (
+              ) : publicProducts.length === 0 ? (
                 <div className="py-8 px-4 text-center space-y-2.5">
                   <Package size={36} className="mx-auto opacity-45 text-[#246BFD]" />
                   <h3 className="font-black text-sm">Ainda não existem artigos publicados no catálogo</h3>
@@ -1134,7 +1254,7 @@ export const MobileApp: React.FC = () => {
                 </div>
               ) : (
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-                  {products.map((product) => (
+                  {publicProducts.map((product) => (
                     <ProductCard
                       key={product.id}
                       product={product}
@@ -1218,26 +1338,35 @@ export const MobileApp: React.FC = () => {
             </div>
 
             {categoryAds[0] && (
-              <button
-                type="button"
+              <div
+                role="button"
+                tabIndex={0}
                 onClick={() => handleOpenSponsoredAd(categoryAds[0])}
-                className="w-full p-4 rounded-2xl border border-[#246BFD]/40 bg-[#246BFD]/10 text-left flex items-center justify-between gap-3 cursor-pointer"
+                onKeyDown={(e) => e.key === "Enter" && handleOpenSponsoredAd(categoryAds[0])}
+                className="w-full p-3.5 rounded-2xl border border-[#246BFD]/40 bg-[#246BFD]/10 text-left flex items-center justify-between gap-3 cursor-pointer"
               >
-                <div className="min-w-0">
-                  <span className="inline-block text-[10px] font-black px-2 py-0.5 rounded-full bg-[#B7F34A] text-slate-950 mb-1">
+                {(categoryAds[0].imageUrl || categoryAds[0].videoUrl || categoryAds[0].storeImage) && (
+                  <SponsoredMediaView
+                    ad={categoryAds[0]}
+                    compact
+                    className="w-20 h-16 rounded-xl overflow-hidden shrink-0 border border-[#246BFD]/30"
+                  />
+                )}
+                <div className="min-w-0 flex-1">
+                  <span className="inline-block text-[10px] font-black px-2 py-0.5 rounded-md bg-[#B7F34A] text-slate-950 mb-1">
                     Patrocinado
                   </span>
                   <h3 className="font-black text-sm truncate">{categoryAds[0].title}</h3>
                   {categoryAds[0].subtitle && <p className="text-xs opacity-75 truncate">{categoryAds[0].subtitle}</p>}
                 </div>
                 <ChevronRight size={16} className="shrink-0 text-[#246BFD]" />
-              </button>
+              </div>
             )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               {categories.map((c) => {
                 const Icon = CAT_ICON_MAP[c.icon] || Tag;
-                const count = products.filter((p) => p.categoryName.toLowerCase() === c.name.toLowerCase()).length;
+                const count = publicProducts.filter((p) => p.categoryName.toLowerCase() === c.name.toLowerCase()).length;
                 return (
                   <button
                     key={c.id}
@@ -1368,7 +1497,7 @@ export const MobileApp: React.FC = () => {
 
         {/* VIEW: STORE DETAIL */}
         {view === "store" && selectedStore && (() => {
-          const storeProducts = products.filter(
+          const storeProducts = publicProducts.filter(
             (p) => p.storeId === selectedStore.id || p.sellerId === selectedStore.ownerId
           );
           return (
@@ -1559,19 +1688,28 @@ export const MobileApp: React.FC = () => {
             </div>
 
             {searchAds[0] && (
-              <button
-                type="button"
+              <div
+                role="button"
+                tabIndex={0}
                 onClick={() => handleOpenSponsoredAd(searchAds[0])}
-                className="w-full p-3.5 rounded-2xl border border-[#246BFD]/40 bg-[#246BFD]/10 text-left flex items-center justify-between gap-3 cursor-pointer"
+                onKeyDown={(e) => e.key === "Enter" && handleOpenSponsoredAd(searchAds[0])}
+                className="w-full p-3 rounded-2xl border border-[#246BFD]/40 bg-[#246BFD]/10 text-left flex items-center justify-between gap-3 cursor-pointer"
               >
-                <div className="min-w-0">
-                  <span className="inline-block text-[10px] font-black px-2 py-0.5 rounded-full bg-[#B7F34A] text-slate-950 mr-2">
+                {(searchAds[0].imageUrl || searchAds[0].videoUrl || searchAds[0].storeImage) && (
+                  <SponsoredMediaView
+                    ad={searchAds[0]}
+                    compact
+                    className="w-20 h-14 rounded-xl overflow-hidden shrink-0 border border-[#246BFD]/30"
+                  />
+                )}
+                <div className="min-w-0 flex-1">
+                  <span className="inline-block text-[10px] font-black px-2 py-0.5 rounded-md bg-[#B7F34A] text-slate-950 mr-2">
                     Patrocinado
                   </span>
                   <span className="font-black text-xs">{searchAds[0].title}</span>
                 </div>
                 <ChevronRight size={15} className="shrink-0 text-[#246BFD]" />
-              </button>
+              </div>
             )}
 
             {showFilters && (
@@ -2328,8 +2466,8 @@ export const MobileApp: React.FC = () => {
 
             {!user ? (
               <div className="p-6 sm:p-8 text-center rounded-3xl border space-y-4" style={{ backgroundColor: "var(--surface)", borderColor: "var(--border)" }}>
-                <h3 className="font-black text-base">Aceder com E-mail e Código de 6 Dígitos</h3>
-                <p className="text-xs opacity-70">Exclusivo para residentes na província do Uíge. Recebe o código de verificação no teu e-mail.</p>
+                <h3 className="font-black text-base">Aceder com E-mail e Palavra-passe</h3>
+                <p className="text-xs opacity-70">Exclusivo para residentes na província do Uíge. A tua sessão fica guardada no telemóvel.</p>
                 <button
                   type="button"
                   onClick={() => {
@@ -2491,6 +2629,19 @@ export const MobileApp: React.FC = () => {
         )}
       </main>
 
+      {/* Botão flutuante "+ Publicar" exclusivo para comerciantes aprovados */}
+      {canShowFloatingPublish && (
+        <button
+          type="button"
+          onClick={() => setPublishModalOpen(true)}
+          className="fixed bottom-20 md:bottom-6 right-4 md:right-6 z-30 min-h-[48px] px-4 py-3 rounded-2xl bg-[#B7F34A] text-slate-950 font-black text-xs shadow-2xl border border-black/15 flex items-center gap-1.5 cursor-pointer active:scale-95 transition-transform"
+          aria-label="Publicar artigo"
+        >
+          <Plus size={18} strokeWidth={2.75} />
+          <span>Publicar</span>
+        </button>
+      )}
+
       {/* Android Bottom Navigation */}
       <BottomNav activeView={view} onSelectNav={navigateTo} cartCount={cartCount} />
 
@@ -2513,6 +2664,20 @@ export const MobileApp: React.FC = () => {
         showToast={showToast}
       />
 
+      <PublishProductModal
+        isOpen={publishModalOpen}
+        onClose={() => setPublishModalOpen(false)}
+        user={user}
+        myStore={myStore}
+        categories={categories}
+        systemConfig={systemConfig}
+        onPublished={async () => {
+          await loadData();
+        }}
+        onGoToSeller={() => navigateTo("seller")}
+        showToast={showToast}
+      />
+
       <ProductDetailModal
         product={selectedProduct}
         isOpen={Boolean(selectedProduct)}
@@ -2531,7 +2696,7 @@ export const MobileApp: React.FC = () => {
               }
             : undefined
         }
-        similarProducts={products
+        similarProducts={publicProducts
           .filter((p) => p.id !== selectedProduct?.id && p.categoryName === selectedProduct?.categoryName)
           .slice(0, 4)}
         onSelectProduct={openProductDetails}
@@ -2559,6 +2724,16 @@ export const MobileApp: React.FC = () => {
         onClose={() => setShowPrivacyModal(false)}
         isLoggedIn={Boolean(user)}
         onDeleteAccountRequested={handleDeleteAccount}
+      />
+
+      <FullscreenAdOverlay
+        ad={fullscreenAd}
+        store={fullscreenAd?.storeId ? stores.find((s) => s.id === fullscreenAd.storeId) || null : null}
+        onClose={() => setFullscreenAd(null)}
+        onOpenStore={(targetAd) => {
+          setFullscreenAd(null);
+          handleOpenSponsoredAd(targetAd, true);
+        }}
       />
 
       {/* Toast Alert */}

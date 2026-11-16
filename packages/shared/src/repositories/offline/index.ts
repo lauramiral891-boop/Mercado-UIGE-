@@ -81,6 +81,7 @@ import {
 } from "../../lib/storage";
 import { smartSearch, generateOrderCode, generateDeliveryCode } from "../../lib/utils";
 import { allowTelemetryWrite, sanitizeTelemetryText } from "../../lib/observability";
+import { isAdEligibleForPaidStore, storeHasActivePaidPlan } from "../../lib/adDelivery";
 
 export interface SyncAction {
   id: string;
@@ -298,8 +299,10 @@ export class OfflineProductRepo implements IProductRepo {
   async create(product: Partial<Product>): Promise<Product> {
     const currentUser = getStoredCurrentUser();
     const stores = getStoredStores();
+    const cfg = getStoredSystemConfig();
     const st = product.storeId ? stores.find((s) => s.id === product.storeId) : undefined;
     const mutationId = `prod_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const defaultApproved = !cfg.requireProductApproval;
     const newProd: Product = {
       id: product.id || mutationId,
       storeId: product.storeId,
@@ -318,9 +321,11 @@ export class OfflineProductRepo implements IProductRepo {
       brand: product.brand || "",
       image: product.image || "",
       images: product.images || (product.image ? [product.image] : []),
+      videoUrl: product.videoUrl || null,
+      mediaType: product.mediaType || (product.videoUrl ? "video" : "imagem"),
       province: "Uíge",
       municipality: product.municipality || "Uíge",
-      isApproved: product.isApproved ?? true,
+      isApproved: product.isApproved ?? defaultApproved,
       storeName: product.storeName || st?.name || "Loja Local",
       storeCode: st?.code,
       storeType: product.storeType || st?.storeType || "loja_fixa",
@@ -897,11 +902,21 @@ export class OfflineReportRepo implements IReportRepo {
 export class OfflineAdRepo implements IAdRepo {
   async getAll(includeAll = false): Promise<SponsoredAd[]> {
     const now = Date.now();
+    const stores = getStoredStores();
     const list = getStoredAds().map((ad) => {
-      if (ad.active && new Date(ad.endDate).getTime() < now) {
-        return { ...ad, active: false, status: "expirado" as const };
-      }
-      return ad;
+      const store = ad.storeId ? stores.find((s) => s.id === ad.storeId) : undefined;
+      const expired = ad.active && new Date(ad.endDate).getTime() < now;
+      return {
+        ...ad,
+        mediaType: ad.mediaType || (ad.videoUrl ? ("video" as const) : ("imagem" as const)),
+        storePlanType: store?.planType ?? ad.storePlanType,
+        storePlanExpiresAt: store?.planExpiresAt ?? ad.storePlanExpiresAt,
+        storeIsApproved: store?.isApproved ?? ad.storeIsApproved,
+        storeIsSuspended: store?.isSuspended ?? ad.storeIsSuspended,
+        storeImage: store?.facadeImage || store?.logo || ad.storeImage,
+        active: expired ? false : ad.active,
+        status: expired ? ("expirado" as const) : ad.status,
+      };
     });
     saveAds(list);
     if (includeAll) return list;
@@ -910,7 +925,8 @@ export class OfflineAdRepo implements IAdRepo {
         a.active &&
         a.status === "aprovado" &&
         new Date(a.startDate).getTime() <= now &&
-        new Date(a.endDate).getTime() >= now
+        new Date(a.endDate).getTime() >= now &&
+        isAdEligibleForPaidStore(a, stores, now)
     );
   }
 
@@ -920,16 +936,34 @@ export class OfflineAdRepo implements IAdRepo {
   }
 
   async create(ad: Partial<SponsoredAd>): Promise<SponsoredAd> {
+    const stores = getStoredStores();
+    const targetStore = ad.storeId ? stores.find((s) => s.id === ad.storeId) : undefined;
+    if ((ad.active || ad.status === "aprovado") && (!targetStore || !storeHasActivePaidPlan(targetStore))) {
+      throw new Error("Apenas lojas com plano pago activo podem ter anúncios patrocinados.");
+    }
+
+    const mediaType: "imagem" | "video" =
+      ad.mediaType === "video" || (Boolean(ad.videoUrl) && ad.mediaType !== "imagem")
+        ? "video"
+        : "imagem";
+
     const item: SponsoredAd = {
-      id: `ad_${Date.now()}`,
+      id: `ad_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       storeId: ad.storeId,
-      sellerId: ad.sellerId || "anon",
+      sellerId: ad.sellerId || targetStore?.ownerId || "anon",
       productId: ad.productId,
-      storeName: ad.storeName,
+      storeName: ad.storeName || targetStore?.name,
+      storePlanType: targetStore?.planType ?? ad.storePlanType,
+      storePlanExpiresAt: targetStore?.planExpiresAt ?? ad.storePlanExpiresAt,
+      storeIsApproved: targetStore?.isApproved ?? ad.storeIsApproved,
+      storeIsSuspended: targetStore?.isSuspended ?? ad.storeIsSuspended,
+      storeImage: targetStore?.facadeImage || targetStore?.logo || ad.storeImage,
       productName: ad.productName,
       title: ad.title || "Campanha Patrocinada",
       subtitle: ad.subtitle || "",
-      imageUrl: ad.imageUrl || "",
+      imageUrl: ad.imageUrl || targetStore?.facadeImage || targetStore?.logo || "",
+      videoUrl: ad.videoUrl || null,
+      mediaType,
       position: ad.position || "topo",
       startDate: ad.startDate || new Date().toISOString(),
       endDate: ad.endDate || new Date(Date.now() + 30 * 86400000).toISOString(),
@@ -944,6 +978,16 @@ export class OfflineAdRepo implements IAdRepo {
   }
 
   async updateStatus(id: string, status: SponsoredAd["status"], active: boolean): Promise<void> {
+    if (active) {
+      const ads = getStoredAds();
+      const target = ads.find((a) => a.id === id);
+      if (target) {
+        const stores = getStoredStores();
+        if (!isAdEligibleForPaidStore(target, stores)) {
+          throw new Error("Apenas lojas com plano pago activo podem activar anúncios patrocinados.");
+        }
+      }
+    }
     saveAds(getStoredAds().map((a) => (a.id === id ? { ...a, status, active } : a)));
   }
 

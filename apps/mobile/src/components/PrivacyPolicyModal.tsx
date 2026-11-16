@@ -146,7 +146,7 @@ export const PrivacyPolicyModal: React.FC<PrivacyPolicyModalProps> = ({
                 1. Compromisso de Privacidade e Protecção de Dados
               </h3>
               <p>
-                A plataforma <b>Mercado Uíge</b> respeita a sua privacidade. Recolhemos apenas os dados estritamente necessários para permitir a compra, venda e entrega de artigos na província do Uíge, nomeadamente: nome, número de telefone para contacto de entregas e endereço de e-mail para acesso seguro via código de 6 dígitos.
+                A plataforma <b>Mercado Uíge</b> respeita a sua privacidade. Recolhemos apenas os dados estritamente necessários para permitir a compra, venda e entrega de artigos na província do Uíge, nomeadamente: nome, número de telefone para contacto de entregas, morada/bairro e endereço de e-mail protegido por palavra-passe (com verificação por código apenas no registo e recuperação).
               </p>
 
               <h3 className="font-black text-sm text-[var(--text-primary)]">

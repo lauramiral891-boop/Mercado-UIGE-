@@ -135,7 +135,7 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
           <StoreIcon size={38} className="mx-auto text-[#246BFD] opacity-70" />
           <h3 className="font-black text-base">Entre com a sua conta para vender</h3>
           <p className="text-xs opacity-70">
-            Autentique-se com o código de 6 dígitos enviado por e-mail para abrir a sua loja ou anunciar artigos no Uíge.
+            Entra com o teu e-mail e palavra-passe para abrir a sua loja ou anunciar artigos no Uíge.
           </p>
           <button
             type="button"
@@ -237,7 +237,7 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
         if (url) imageUrl = url;
       }
 
-      await productRepo.create({
+      const created = await productRepo.create({
         name: sellerForm.name,
         description: sellerForm.description,
         price: Number(sellerForm.price),
@@ -252,6 +252,7 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
         storeId: myStore?.id,
         storeName: myStore?.name,
         storeType: myStore?.storeType,
+        isApproved: !systemConfig.requireProductApproval,
       });
 
       setSellerForm({
@@ -268,7 +269,12 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
       });
       setPendingUploadBlob(null);
       setCompressedSize(null);
-      showToast("Artigo anunciado com sucesso no Mercado Uíge!");
+      const pending = Boolean(systemConfig.requireProductApproval) || created.isApproved === false;
+      showToast(
+        pending
+          ? "Artigo enviado! Aguarda aprovação do administrador."
+          : "Artigo anunciado com sucesso no Mercado Uíge!"
+      );
       await onReload();
     } catch (err: unknown) {
       showToast(translateErrorMessage(err, "Não foi possível publicar o artigo."));
@@ -756,6 +762,9 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
                     </span>
                     <span className="text-[#B7F34A] font-black tabular-nums">{fmtKz(mp.price)}</span>
                     <span className="opacity-65 ml-2">Stock: {mp.stock} un.</span>
+                    {mp.isApproved === false && (
+                      <span className="ml-2 text-amber-400 font-bold">· Em aprovação</span>
+                    )}
                   </div>
                   <button
                     type="button"

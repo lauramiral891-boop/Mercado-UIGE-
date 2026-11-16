@@ -18,8 +18,12 @@ import { PrivacyPolicyModal } from "../components/PrivacyPolicyModal";
 import { OnlineStatusIndicator } from "../components/OnlineStatusIndicator";
 import { CourierView } from "../components/CourierView";
 import { SellerStudioView } from "../components/SellerStudioView";
+import { PublishProductModal } from "../components/PublishProductModal";
+import { SponsoredMediaView } from "../components/SponsoredMediaView";
+import { FullscreenAdOverlay } from "../components/FullscreenAdOverlay";
 import { MobileApp } from "../App";
 import { AdminApp } from "../../../admin/src/App";
+import { AdsSection } from "../../../admin/src/components/OperationalSections";
 
 const SAMPLE_PRODUCT: Product = {
   id: "prod_1",
@@ -235,7 +239,10 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
 
   it("renderiza modais Auth, Location e Privacy sem texto técnico", () => {
     const authHtml = renderToStaticMarkup(
-      <AuthModal isOpen={true} onClose={() => {}} onSuccess={() => {}} showToast={() => {}} />
+      <AuthModal isOpen={true} initialMode="login" onClose={() => {}} onSuccess={() => {}} showToast={() => {}} />
+    );
+    const authRegisterHtml = renderToStaticMarkup(
+      <AuthModal isOpen={true} initialMode="register" onClose={() => {}} onSuccess={() => {}} showToast={() => {}} />
     );
     const locHtml = renderToStaticMarkup(
       <LocationModal
@@ -250,8 +257,12 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
     );
 
     assertCleanUiMarkup(authHtml);
+    assertCleanUiMarkup(authRegisterHtml);
     assertCleanUiMarkup(locHtml);
     assertCleanUiMarkup(privHtml);
+    expect(authHtml).toContain("Esqueci a palavra-passe");
+    expect(authHtml).toContain("Entrar na Conta");
+    expect(authRegisterHtml).toContain("Confirmar Palavra-passe");
     expect(privHtml).toContain("Enviar pedido por WhatsApp");
   });
 
@@ -266,5 +277,133 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
       </ErrorBoundary>
     );
     expect(okBoundary).toContain("Conteúdo OK");
+
+    const publishHtml = renderToStaticMarkup(
+      <PublishProductModal
+        isOpen={true}
+        onClose={() => {}}
+        user={{
+          id: "u-merc",
+          name: "Comerciante Teste",
+          email: "merc@uige.ao",
+          role: "comerciante",
+          isApproved: true,
+          province: "Uíge",
+          municipality: "Uíge",
+          walletBalance: 0,
+          createdAt: "2026-01-01T00:00:00Z",
+        }}
+        myStore={{
+          id: "st-1",
+          ownerId: "u-merc",
+          name: "Banca Teste",
+          description: "",
+          category: "Moda",
+          storeType: "loja_fixa",
+          province: "Uíge",
+          municipality: "Uíge",
+          logo: "",
+          isApproved: true,
+          isVip: false,
+          rating: 5,
+          salesCount: 0,
+          createdAt: "2026-01-01T00:00:00Z",
+        }}
+        categories={DEFAULT_CATEGORIES}
+        systemConfig={{ ...DEFAULT_SYSTEM_CONFIG, requireProductApproval: true }}
+        onPublished={() => {}}
+        onGoToSeller={() => {}}
+        showToast={() => {}}
+      />
+    );
+    assertCleanUiMarkup(publishHtml);
+    expect(publishHtml).toContain("Publicar Novo Artigo");
+    expect(publishHtml).toContain("Vídeo (≤ 15s / 5MB)");
+    expect(publishHtml).toContain("aguarda aprovação");
+  });
+
+  it("renderiza SponsoredMediaView, FullscreenAdOverlay e AdsSection (só plano pago)", () => {
+    const sampleAd = {
+      id: "ad_1",
+      storeId: "st_paid",
+      sellerId: "u1",
+      storeName: "Super Uíge",
+      title: "Campanha em Vídeo",
+      subtitle: "Entregas rápidas hoje",
+      imageUrl: "",
+      videoUrl: "https://cdn.example.com/ad.mp4",
+      mediaType: "video" as const,
+      position: "topo" as const,
+      startDate: "2026-01-01T00:00:00Z",
+      endDate: "2027-01-01T00:00:00Z",
+      views: 12,
+      clicks: 3,
+      active: true,
+      status: "aprovado" as const,
+      createdAt: "2026-01-01T00:00:00Z",
+    };
+
+    const inlineMediaHtml = renderToStaticMarkup(<SponsoredMediaView ad={sampleAd} />);
+    assertCleanUiMarkup(inlineMediaHtml);
+    expect(inlineMediaHtml).toContain("<video");
+    expect(inlineMediaHtml).toContain("muted");
+
+    const fullscreenHtml = renderToStaticMarkup(
+      <FullscreenAdOverlay ad={sampleAd} store={null} onClose={() => {}} onOpenStore={() => {}} />
+    );
+    assertCleanUiMarkup(fullscreenHtml);
+    expect(fullscreenHtml).toContain("Patrocinado");
+    expect(fullscreenHtml).toContain("Fechar em 5s");
+    expect(fullscreenHtml).toContain("Visitar Super Uíge");
+
+    const adsAdminHtml = renderToStaticMarkup(
+      <AdsSection
+        ads={[sampleAd]}
+        stores={[
+          {
+            id: "st_paid",
+            code: "LJ-0001",
+            ownerId: "u1",
+            name: "Loja Paga VIP",
+            description: "",
+            category: "Moda",
+            storeType: "loja_fixa",
+            province: "Uíge",
+            municipality: "Uíge",
+            logo: "",
+            isApproved: true,
+            isVip: true,
+            planType: "vip",
+            rating: 5,
+            salesCount: 10,
+            createdAt: "2026-01-01T00:00:00Z",
+          },
+          {
+            id: "st_free",
+            code: "LJ-0002",
+            ownerId: "u2",
+            name: "Loja Grátis Oculta",
+            description: "",
+            category: "Moda",
+            storeType: "loja_fixa",
+            province: "Uíge",
+            municipality: "Uíge",
+            logo: "",
+            isApproved: true,
+            isVip: false,
+            planType: "gratis",
+            rating: 5,
+            salesCount: 0,
+            createdAt: "2026-01-01T00:00:00Z",
+          },
+        ]}
+        onCreateAd={async () => {}}
+        onToggleAd={() => {}}
+        onDeleteAd={() => {}}
+      />
+    );
+    assertCleanUiMarkup(adsAdminHtml);
+    expect(adsAdminHtml).toContain("Loja Paga VIP");
+    expect(adsAdminHtml).not.toContain("Loja Grátis Oculta");
   });
 });

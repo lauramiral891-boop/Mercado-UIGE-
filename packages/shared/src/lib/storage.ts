@@ -59,6 +59,7 @@ export const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
   ambulantVipPrice: 7500,
   courierBasicPrice: 3000,
   courierVipPrice: 8000,
+  requireProductApproval: false,
   maintenanceMode: false,
   maintenanceMessage: "Estamos em manutenção programada para melhorar o Mercado Uíge. Voltamos em breve.",
 };

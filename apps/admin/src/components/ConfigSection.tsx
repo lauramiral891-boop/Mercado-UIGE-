@@ -201,6 +201,27 @@ export const ConfigSection: React.FC<ConfigSectionProps> = ({
           </div>
         </div>
 
+        {/* Moderação de Artigos Publicados */}
+        <div className="p-4 rounded-xl bg-[#111D30] border border-[#26354B] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <span className="font-black text-white block">Aprovação prévia de artigos publicados</span>
+            <span className="text-[11px] text-[#A6B2C5]">
+              Quando activado, novos artigos publicados pelos comerciantes aguardam aprovação antes de aparecer no catálogo.
+            </span>
+          </div>
+          <label className="inline-flex items-center gap-2.5 cursor-pointer shrink-0 select-none">
+            <input
+              type="checkbox"
+              checked={Boolean(draft.requireProductApproval)}
+              onChange={(e) => setDraft({ ...draft, requireProductApproval: e.target.checked })}
+              className="w-5 h-5 accent-[#B7F34A] cursor-pointer"
+            />
+            <span className={`font-black ${draft.requireProductApproval ? "text-[#B7F34A]" : "text-[#A6B2C5]"}`}>
+              {draft.requireProductApproval ? "Activa" : "Publicação directa"}
+            </span>
+          </label>
+        </div>
+
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[#26354B]">
           {!isSuperAdmin && (
             <span className="text-[11px] text-[#A6B2C5]">
@@ -224,6 +245,7 @@ export const ConfigSection: React.FC<ConfigSectionProps> = ({
                       defaultDeliveryFee: draft.defaultDeliveryFee,
                       deliveryCommissionPercent: draft.deliveryCommissionPercent,
                       courierMonthlyFee: draft.courierMonthlyFee,
+                      requireProductApproval: Boolean(draft.requireProductApproval),
                       adminWhatsapp: draft.adminWhatsapp.trim() || "945379003",
                       autoSuspendReportsThreshold: Math.max(1, draft.autoSuspendReportsThreshold),
                     }
@@ -239,8 +261,9 @@ export const ConfigSection: React.FC<ConfigSectionProps> = ({
                       defaultDeliveryFee: draft.defaultDeliveryFee,
                       deliveryCommissionPercent: draft.deliveryCommissionPercent,
                       courierMonthlyFee: draft.courierMonthlyFee,
+                      requireProductApproval: Boolean(draft.requireProductApproval),
                     },
-                "Preços, comissões e definições globais do sistema"
+                "Preços, comissões, moderação de artigos e definições globais do sistema"
               )
             }
             className="ml-auto px-5 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black flex items-center gap-2 cursor-pointer"

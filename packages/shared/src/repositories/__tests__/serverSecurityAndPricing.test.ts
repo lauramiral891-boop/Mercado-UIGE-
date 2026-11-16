@@ -31,6 +31,10 @@ const MIGRATION_PATH = path.resolve(
   import.meta.dirname,
   "../../../../../supabase/migrations/20250105_server_price_and_admin_field_locks.sql"
 );
+const MIGRATION_V6_PATH = path.resolve(
+  import.meta.dirname,
+  "../../../../../supabase/migrations/20250106_password_auth_media_and_paid_ads.sql"
+);
 
 /**
  * Simula em memória a lógica exacta dos triggers SQL da migração 20250105 para validar
@@ -588,5 +592,18 @@ describe("Migração 20250105 — Bloqueios Admin, Papéis de Equipa e Centro de
     expect(allowTelemetryWrite("test:spam", 15, 100020)).toBe(false);
     // Após 61 segundos volta a permitir
     expect(allowTelemetryWrite("test:spam", 15, 162000)).toBe(true);
+  });
+
+  it("10. Migração 20250106 reforça vídeo, moderação opcional de artigos, anúncios só para planos pagos e limite 5 MB", () => {
+    const sqlV6 = fs.readFileSync(MIGRATION_V6_PATH, "utf-8");
+
+    expect(sqlV6).toContain("ADD COLUMN IF NOT EXISTS video_url TEXT");
+    expect(sqlV6).toContain("exigir_aprovacao_produtos BOOLEAN NOT NULL DEFAULT FALSE");
+    expect(sqlV6).toContain("Comerciante aprovado ou Admin publica produtos");
+    expect(sqlV6).toContain("CREATE OR REPLACE FUNCTION public.loja_tem_plano_pago_activo");
+    expect(sqlV6).toContain("CREATE TRIGGER trg_proteger_anuncio_plano_pago");
+    expect(sqlV6).toContain("Leitura de anúncios pagos ou próprios ou admin");
+    expect(sqlV6).toContain("file_size_limit = 5242880");
+    expect(sqlV6).toContain("video/mp4");
   });
 });

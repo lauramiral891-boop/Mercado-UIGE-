@@ -109,6 +109,8 @@ export interface Product {
   condition: "novo" | "usado";
   image: string;
   images?: string[];
+  videoUrl?: string | null;
+  mediaType?: "imagem" | "video";
   province: string;
   municipality: string;
   bairro?: string;
@@ -226,10 +228,17 @@ export interface SponsoredAd {
   sellerId: string;
   productId?: string;
   storeName?: string;
+  storePlanType?: PlanType;
+  storePlanExpiresAt?: string | null;
+  storeIsApproved?: boolean;
+  storeIsSuspended?: boolean;
+  storeImage?: string;
   productName?: string;
   title: string;
   subtitle?: string;
   imageUrl: string;
+  videoUrl?: string | null;
+  mediaType?: "imagem" | "video";
   position: AdPosition;
   startDate: string;
   endDate: string;
@@ -313,6 +322,7 @@ export interface SystemConfig {
   ambulantVipPrice: number;
   courierBasicPrice: number;
   courierVipPrice: number;
+  requireProductApproval?: boolean;
   maintenanceMode?: boolean;
   maintenanceMessage?: string;
 }
