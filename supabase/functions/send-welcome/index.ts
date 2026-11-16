@@ -4,12 +4,13 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.119.0";
-import { SmtpClient } from "https://deno.land/x/smtp@v0.7.0/mod.ts";
+import nodemailer from "npm:nodemailer@6.9.16";
 
 const SMTP_HOSTNAME = Deno.env.get("SMTP_HOSTNAME") || "smtp.gmail.com";
 const SMTP_PORT = Number(Deno.env.get("SMTP_PORT") || 465);
 const SMTP_USER = Deno.env.get("SMTP_USER") || "tvvibeoficial@gmail.com";
 const SMTP_PASS = Deno.env.get("SMTP_PASS") || "";
+const APP_URL = Deno.env.get("APP_URL") || "https://mercadouige.ao";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
 
@@ -115,7 +116,7 @@ serve(async (req: Request) => {
                 </ul>
               </div>
               <div style="text-align: center; padding: 15px 0;">
-                <a href="https://ais-pre-j6qao67g6kjax4aoxqimxl-407656935131.europe-west2.run.app"
+                <a href="${APP_URL}"
                    style="display: inline-block; padding: 14px 32px; font-size: 14px; font-weight: 900; color: #07111F; background-color: #B7F34A; text-decoration: none; border-radius: 14px;">
                   Entrar no Mercado Uíge
                 </a>
@@ -140,23 +141,23 @@ serve(async (req: Request) => {
 
     // 3. Enviar via SMTP Gmail usando segredos configurados no Supabase
     if (SMTP_PASS) {
-      const client = new SmtpClient();
-      await client.connectTLS({
-        hostname: SMTP_HOSTNAME,
+      const transporter = nodemailer.createTransport({
+        host: SMTP_HOSTNAME,
         port: SMTP_PORT,
-        username: SMTP_USER,
-        password: SMTP_PASS,
+        secure: SMTP_PORT === 465,
+        auth: {
+          user: SMTP_USER,
+          pass: SMTP_PASS,
+        },
       });
 
-      await client.send({
+      await transporter.sendMail({
         from: `Mercado Uíge <${SMTP_USER}>`,
         to: userEmail,
         subject: `Bem-vindo ao Mercado Uíge, ${firstName}!`,
-        content: emailHtml,
         html: emailHtml,
       });
 
-      await client.close();
       console.log(`[send-welcome] Email enviado com sucesso para ${userEmail}`);
     } else {
       console.log(`[send-welcome] SMTP_PASS não configurado nos segredos do Supabase. Execução segura sem bloquear registo.`);

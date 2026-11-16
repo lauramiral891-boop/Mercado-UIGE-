@@ -37,7 +37,10 @@ mercado-uige/
 │   ├── functions/send-welcome/index.ts  # Edge Function gratuita de boas-vindas (idempotente)
 │   ├── migrations/
 │   │   ├── 20250101_mercado_uige_schema.sql
-│   │   └── 20250102_security_hardening.sql
+│   │   ├── 20250102_security_hardening.sql
+│   │   ├── 20250103_marketplace_v2_features.sql
+│   │   ├── 20250104_whatsapp_orders_and_typed_plans.sql
+│   │   └── 20250105_server_price_and_admin_field_locks.sql
 │   └── templates/
 │       ├── email_verification_otp.html
 │       ├── email_recovery_otp.html
@@ -54,6 +57,9 @@ mercado-uige/
 3. No **SQL Editor** do Supabase, execute os ficheiros pela ordem exacta:
    - `supabase/migrations/20250101_mercado_uige_schema.sql`
    - `supabase/migrations/20250102_security_hardening.sql`
+   - `supabase/migrations/20250103_marketplace_v2_features.sql`
+   - `supabase/migrations/20250104_whatsapp_orders_and_typed_plans.sql`
+   - `supabase/migrations/20250105_server_price_and_admin_field_locks.sql`
 4. A segunda migração activa:
    - Função `public.is_admin()` (`SECURITY DEFINER`) para validar privilégios sem recursão RLS.
    - Trigger `trg_prevent_role_escalation` para impedir auto-promoção a `admin` por qualquer cliente da API.

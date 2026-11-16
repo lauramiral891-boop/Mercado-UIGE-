@@ -138,6 +138,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         return;
       }
 
+      setOtpCode("");
       setMode("otp");
       setResendTimer(60);
       showToast(`Código enviado para ${cleanEmail}`);
@@ -168,7 +169,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       }
 
       if (isSupabaseConfigured && data?.user) {
-        if (name.trim() || phone.trim() || bairro.trim() || biNumber.trim()) {
+        if (name.trim() || phone.trim() || biNumber.trim()) {
           await userRepo.updateProfile(data.user.id, {
             name: name.trim() || undefined,
             phone: phone.trim() || undefined,
@@ -541,7 +542,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 type="text"
                 inputMode="numeric"
                 required
-                maxLength={6}
+                maxLength={8}
                 value={otpCode}
                 onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
                 placeholder="000000"

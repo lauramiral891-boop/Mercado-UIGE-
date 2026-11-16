@@ -399,6 +399,10 @@ export class OfflineOrderRepo implements IOrderRepo {
     const resolvedStoreId = orderData.storeId || firstProd?.storeId;
     const storeObj = resolvedStoreId ? stores.find((s) => s.id === resolvedStoreId) : undefined;
     const currentUser = getStoredCurrentUser();
+    const sysCfg = getStoredSystemConfig();
+    const deliveryType = orderData.deliveryType === "levantamento" ? "levantamento" : "entrega";
+    const authoritativeDeliveryFee =
+      deliveryType === "levantamento" ? 0 : Math.max(0, Number(sysCfg.defaultDeliveryFee ?? 1500));
     const subtotal = orderItems.reduce((sum, item) => sum + item.price * item.qty, 0);
     const mutationId = orderData.clientMutationId || `order_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
@@ -416,9 +420,9 @@ export class OfflineOrderRepo implements IOrderRepo {
       paidAt: null,
       items: orderItems,
       subtotal,
-      deliveryType: orderData.deliveryType || "entrega",
-      deliveryFee: orderData.deliveryFee,
-      total: subtotal + orderData.deliveryFee,
+      deliveryType,
+      deliveryFee: authoritativeDeliveryFee,
+      total: subtotal + authoritativeDeliveryFee,
       address: orderData.address,
       paymentMethod: orderData.paymentMethod,
       createdAt: new Date().toISOString(),

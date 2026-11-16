@@ -319,8 +319,8 @@ export class SupabaseOrderRepo implements IOrderRepo {
     }
   }
 
-  async syncPendingOrder(orderPayload: Order): Promise<void> {
-    if (!isSupabaseConfigured) return;
+  async syncPendingOrder(orderPayload: Order): Promise<Order | null> {
+    if (!isSupabaseConfigured) return null;
 
     const { data: existing } = orderPayload.clientMutationId
       ? await supabase
@@ -330,7 +330,7 @@ export class SupabaseOrderRepo implements IOrderRepo {
           .maybeSingle()
       : { data: null };
 
-    if (existing) return;
+    if (existing) return this.getById(existing.id);
 
     const { data: newOrder, error: orderErr } = await supabase
       .from("encomendas")
@@ -341,11 +341,8 @@ export class SupabaseOrderRepo implements IOrderRepo {
         telefone_cliente: orderPayload.userPhone || null,
         loja_id: orderPayload.storeId || null,
         estado: "Pendente",
-        estado_pagamento: orderPayload.paymentStatus || "pendente",
-        subtotal: orderPayload.subtotal,
+        estado_pagamento: "pendente",
         tipo_entrega: orderPayload.deliveryType || "entrega",
-        taxa_entrega: orderPayload.deliveryFee,
-        total: orderPayload.total,
         endereco_entrega: orderPayload.address,
         metodo_pagamento: orderPayload.paymentMethod,
         client_mutation_id: orderPayload.clientMutationId || null,
@@ -370,15 +367,22 @@ export class SupabaseOrderRepo implements IOrderRepo {
       const { error: itemsErr } = await supabase.from("itens_encomenda").insert(itemsToInsert);
       if (itemsErr) throw itemsErr;
     }
+
+    // Relê a encomenda com subtotal, taxa_entrega e total recalculados pelos triggers do servidor
+    const serverOrder = await this.getById(newOrder.id);
+    return serverOrder;
   }
 
   async create(orderData: any): Promise<Order> {
     const localOrder = await fallbackOrderRepo.create(orderData);
     if (isSupabaseConfigured) {
       try {
-        await this.syncPendingOrder(localOrder);
+        const serverOrder = await this.syncPendingOrder(localOrder);
         if (localOrder.clientMutationId) {
           syncQueue.markProcessed(localOrder.clientMutationId);
+        }
+        if (serverOrder) {
+          return serverOrder;
         }
       } catch {}
     }
@@ -510,9 +514,18 @@ export class SupabaseUserRepo implements IUserRepo {
   async getCurrentUser(): Promise<User | null> {
     if (!isSupabaseConfigured) return fallbackUserRepo.getCurrentUser();
     try {
-      const { data: authData } = await supabase.auth.getUser();
-      const authUser = authData?.user;
-      if (!authUser) return fallbackUserRepo.getCurrentUser();
+      const { data: sessionData } = await supabase.auth.getSession();
+      const sessionUser = sessionData?.session?.user;
+      if (!sessionUser) {
+        saveCurrentUser(null);
+        return null;
+      }
+
+      const { data: authData, error: authErr } = await supabase.auth.getUser();
+      const authUser = authData?.user || sessionUser;
+      if (authErr && !navigator.onLine) {
+        return fallbackUserRepo.getCurrentUser();
+      }
 
       const { data: profile, error } = await supabase
         .from("perfis")
@@ -520,13 +533,15 @@ export class SupabaseUserRepo implements IUserRepo {
         .eq("id", authUser.id)
         .single();
 
-      if (error || !profile) return fallbackUserRepo.getCurrentUser();
+      if (error || !profile) {
+        return !navigator.onLine ? fallbackUserRepo.getCurrentUser() : null;
+      }
 
       const mapped = this.mapUserRow(profile, Boolean(authUser.email_confirmed_at));
       saveCurrentUser(mapped);
       return mapped;
     } catch {
-      return fallbackUserRepo.getCurrentUser();
+      return !navigator.onLine ? fallbackUserRepo.getCurrentUser() : null;
     }
   }
 

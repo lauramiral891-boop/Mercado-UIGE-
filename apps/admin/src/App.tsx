@@ -58,6 +58,7 @@ import {
   sendEmailOtp,
   verifyEmailOtp,
   supabase,
+  isSupabaseConfigured,
   saveCurrentUser,
   notificationRepo,
   SafeImage,
@@ -232,6 +233,7 @@ export const AdminApp: React.FC = () => {
       if (error) {
         setLoginError(translateErrorMessage(error, "Não foi possível enviar o código de verificação."));
       } else {
+        setOtpCode("");
         setOtpSent(true);
         setResendTimer(60);
       }
@@ -268,6 +270,9 @@ export const AdminApp: React.FC = () => {
       }
 
       if (!matched || matched.role !== "admin") {
+        if (isSupabaseConfigured) {
+          await supabase.auth.signOut();
+        }
         setLoginError("Acesso restrito. Esta conta não tem permissões de Administrador.");
         setLoginLoading(false);
         return;
@@ -528,8 +533,9 @@ export const AdminApp: React.FC = () => {
                   <Lock size={16} className="text-[#B7F34A]" />
                   <input
                     type="text"
+                    inputMode="numeric"
                     required
-                    maxLength={6}
+                    maxLength={8}
                     value={otpCode}
                     onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
                     placeholder="123456"

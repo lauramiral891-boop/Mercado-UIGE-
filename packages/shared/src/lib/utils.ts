@@ -85,6 +85,18 @@ export function translateErrorMessage(
     return "O código expirou. Pede um novo código.";
   }
 
+  if (msg.includes("secret api key") || msg.includes("invalid api key")) {
+    return "Configuração inválida do servidor: chave secreta não permitida na app.";
+  }
+
+  if (msg.includes("error sending") || msg.includes("smtp")) {
+    return "Não foi possível enviar o e-mail. Verifica as definições de SMTP no Supabase.";
+  }
+
+  if (msg.includes("signups not allowed") || msg.includes("otp_disabled")) {
+    return "Registo temporariamente indisponível. Tenta novamente mais tarde.";
+  }
+
   if (
     msg.includes("invalid") ||
     msg.includes("otp") ||

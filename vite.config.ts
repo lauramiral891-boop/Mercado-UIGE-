@@ -1,9 +1,15 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
+import dotenv from 'dotenv';
+import fs from 'fs';
 import path from 'path';
 import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
+  const rootEnvPath = path.resolve(import.meta.dirname, '.env');
+  if (process.env.VITE_SUPABASE_ANON_KEY?.startsWith('sb_secret_') && fs.existsSync(rootEnvPath)) {
+    dotenv.config({ path: rootEnvPath, override: true });
+  }
   return {
     plugins: [react(), tailwindcss()],
     resolve: {
