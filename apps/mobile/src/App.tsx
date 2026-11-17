@@ -66,6 +66,8 @@ import {
   isAdEligibleForPublicDisplay,
   isEditableElementFocused,
   validateSafeAdDestination,
+  sortBannersForCarousel,
+  CONFIG_REFRESH_INTERVAL_MS,
   productRepo,
   orderRepo,
   messageRepo,
@@ -91,6 +93,7 @@ import {
 import { Header } from "./components/Header";
 import { BottomNav } from "./components/BottomNav";
 import { BottomAdStrip } from "./components/BottomAdStrip";
+import { HomeBannerCarousel } from "./components/HomeBannerCarousel";
 import { ProductCard } from "./components/ProductCard";
 import { LocationModal } from "./components/LocationModal";
 import { AuthModal } from "./components/AuthModal";
@@ -452,7 +455,18 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
 
   useEffect(() => {
     loadData();
-    if (!isSupabaseConfigured) return;
+    const refreshBannersAndConfig = async () => {
+      try {
+        const [activeAds, cfg] = await Promise.all([adRepo.getAll(false), systemConfigRepo.get()]);
+        setAds(activeAds);
+        setSystemConfig(cfg);
+      } catch {}
+    };
+    const refreshTimer = setInterval(refreshBannersAndConfig, CONFIG_REFRESH_INTERVAL_MS);
+
+    if (!isSupabaseConfigured) {
+      return () => clearInterval(refreshTimer);
+    }
     const { data: subscriptionData } = supabase.auth.onAuthStateChange((event) => {
       if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
         loadData();
@@ -462,6 +476,7 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
       }
     });
     return () => {
+      clearInterval(refreshTimer);
       subscriptionData?.subscription?.unsubscribe();
     };
   }, []);
@@ -471,7 +486,10 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
     () => ads.filter((a) => isAdEligibleForPublicDisplay(a, stores)),
     [ads, stores]
   );
-  const topAds = useMemo(() => eligibleAds.filter((a) => a.position === "topo"), [eligibleAds]);
+  const topAds = useMemo(
+    () => sortBannersForCarousel(eligibleAds.filter((a) => a.position === "topo")),
+    [eligibleAds]
+  );
   const stripAds = useMemo(
     () => eligibleAds.filter((a) => a.position === "faixa" && !dismissedStripAdIds.includes(a.id)),
     [eligibleAds, dismissedStripAdIds]
@@ -483,14 +501,6 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
     const dedicated = eligibleAds.filter((a) => a.position === "ecra_inteiro");
     return dedicated.length > 0 ? dedicated : eligibleAds;
   }, [eligibleAds]);
-
-  useEffect(() => {
-    if (topAds.length <= 1) return;
-    const interval = setInterval(() => {
-      setAdSlideIdx((i) => (i + 1) % topAds.length);
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [topAds.length]);
 
   useEffect(() => {
     const visibleAd =
@@ -596,7 +606,7 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
     const destType = ad.destinationType || (ad.productId ? "produto" : "loja");
 
     if (destType === "link") {
-      const check = validateSafeAdDestination("link", ad.destinationValue);
+      const check = validateSafeAdDestination("link", ad.destinationValue || ad.linkUrl);
       if (check.ok && check.normalizedValue) {
         openExternalSafeHref(check.normalizedValue);
       } else {
@@ -1080,8 +1090,6 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
     );
   }
 
-  const currentTopAd = topAds.length > 0 ? topAds[adSlideIdx % topAds.length] : null;
-
   return (
     <div
       className={`min-h-screen flex flex-col justify-between transition-colors duration-200 md:pb-8 ${
@@ -1128,118 +1136,18 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
         {/* VIEW: HOME */}
         {view === "home" && (
           <div className="space-y-6 anim-fadeUp">
-            {/* Carrossel de Anúncios Patrocinados da Base de Dados OU Hero Institucional */}
-            {currentTopAd ? (
-              <div
-                className="relative rounded-3xl overflow-hidden shadow-2xl p-5 sm:p-8 cursor-pointer border border-[#246BFD]/30"
-                style={{
-                  background: "linear-gradient(120deg, #246BFD 0%, #0B2A5B 55%, #07111F 100%)",
-                  color: "#FFFFFF",
-                }}
-                onClick={() => handleOpenSponsoredAd(currentTopAd)}
-              >
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div className="max-w-lg space-y-2 z-10">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className="inline-block text-[10px] font-black px-2.5 py-0.5 rounded-full uppercase tracking-wider text-slate-950"
-                        style={{ backgroundColor: "var(--accent)" }}
-                      >
-                        Patrocinado
-                      </span>
-                      {(currentTopAd.advertiserName || currentTopAd.storeName) && (
-                        <span className="text-xs font-bold opacity-85 truncate">
-                          {currentTopAd.advertiserName || currentTopAd.storeName}
-                        </span>
-                      )}
-                    </div>
-                    <h1 className="text-xl sm:text-3xl font-black leading-tight tracking-tight">
-                      {currentTopAd.title}
-                    </h1>
-                    {currentTopAd.subtitle && (
-                      <p className="text-xs sm:text-sm opacity-90">{currentTopAd.subtitle}</p>
-                    )}
-                    <div className="pt-1">
-                      <span className="inline-flex items-center gap-1 text-xs font-black underline text-[#B7F34A]">
-                        Ver oferta agora <ChevronRight size={14} />
-                      </span>
-                    </div>
-                  </div>
-                  {(currentTopAd.imageUrl || currentTopAd.videoUrl || currentTopAd.storeImage) && (
-                    <SponsoredMediaView
-                      ad={currentTopAd}
-                      className="w-full sm:w-52 h-36 rounded-2xl overflow-hidden shrink-0 border border-white/15"
-                    />
-                  )}
-                </div>
-
-                {topAds.length > 1 && (
-                  <div className="flex items-center gap-1.5 mt-4">
-                    {topAds.map((a, idx) => (
-                      <button
-                        key={a.id}
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setAdSlideIdx(idx);
-                        }}
-                        aria-label={`Anúncio ${idx + 1}`}
-                        className={`h-1.5 rounded-full transition-all cursor-pointer ${
-                          idx === adSlideIdx % topAds.length ? "w-6 bg-[#B7F34A]" : "w-2 bg-white/40"
-                        }`}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div
-                className="relative rounded-3xl overflow-hidden shadow-2xl p-5 sm:p-8"
-                style={{
-                  background: "linear-gradient(120deg, #246BFD 0%, #0B2A5B 55%, #07111F 100%)",
-                  color: "#FFFFFF",
-                }}
-              >
-                <div className="max-w-lg z-10 relative space-y-3">
-                  <span
-                    className="inline-block text-[10px] sm:text-xs font-black px-3 py-1 rounded-full uppercase tracking-wider text-slate-950"
-                    style={{ backgroundColor: "var(--accent)" }}
-                  >
-                    PROVÍNCIA DO UÍGE
-                  </span>
-                  <h1 className="text-xl sm:text-4xl font-black leading-tight tracking-tight">
-                    Comércio Local do Uíge
-                  </h1>
-                  <p className="text-xs sm:text-sm opacity-85 leading-relaxed">
-                    Compre e venda artigos novos e usados com lojas fixas e vendedores locais da província.
-                  </p>
-                  <div className="flex flex-wrap gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => handlePerformSearch("")}
-                      className="px-4 py-2.5 rounded-2xl font-black text-xs text-slate-950 shadow-lg cursor-pointer"
-                      style={{ backgroundColor: "var(--accent)" }}
-                    >
-                      Explorar Catálogo
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => navigateTo("stores")}
-                      className="px-4 py-2.5 rounded-2xl font-bold text-xs border border-white/30 hover:bg-white/10 cursor-pointer"
-                    >
-                      Lojas Locais
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => navigateTo("used")}
-                      className="px-4 py-2.5 rounded-2xl font-bold text-xs border border-white/30 hover:bg-white/10 cursor-pointer"
-                    >
-                      Ver Usados
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
+            {/* Carrossel de Banners (reutilizando anuncios + config global de duração e autoplay) */}
+            <HomeBannerCarousel
+              banners={topAds}
+              autoplay={systemConfig.bannerAutoplay !== false}
+              defaultDurationSec={systemConfig.bannerDefaultDurationSec || 8}
+              activeIndex={adSlideIdx}
+              onActiveIndexChange={setAdSlideIdx}
+              onOpenBanner={(banner) => handleOpenSponsoredAd(banner)}
+              onExploreCatalog={() => handlePerformSearch("")}
+              onOpenStores={() => navigateTo("stores")}
+              onOpenUsed={() => navigateTo("used")}
+            />
 
             {/* Categorias Principais */}
             <div>

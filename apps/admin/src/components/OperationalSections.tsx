@@ -1,5 +1,10 @@
 import React, { useMemo, useRef, useState } from "react";
 import {
+  ArrowDown,
+  ArrowUp,
+  Ban,
+  Check,
+  Clock,
   Crown,
   Eye,
   Film,
@@ -7,10 +12,13 @@ import {
   MousePointerClick,
   Pencil,
   Plus,
+  Save,
+  Send,
   Store as StoreIcon,
   Truck,
   CheckCircle2,
   Upload,
+  X,
 } from "lucide-react";
 import {
   AD_VIDEO_TARGET_BYTES,
@@ -18,6 +26,7 @@ import {
   AdDestinationType,
   AdPosition,
   AuditLogItem,
+  BannerCategory,
   CourierMonthlyFee,
   DeliveryRecord,
   MAX_AD_VIDEO_BYTES,
@@ -25,24 +34,36 @@ import {
   MerchantPayment,
   Product,
   ReportItem,
+  ServerErrorDetail,
   SponsoredAd,
   Store,
   User,
+  clampBannerDurationSec,
+  compressBannerImage,
   compressImage,
   compressVideoOnDevice,
+  computeAdCtrPercent,
+  computeBannerDashboardStats,
+  extractServerErrorDetail,
   fmtDate,
   fmtDateTime,
   fmtKz,
+  formatLuandaDateTimeShort,
   formatPlanType,
   formatStoreType,
   formatUserRole,
+  getNowLuandaInput,
+  isBannerPaid,
   isFinanceRole,
   isModeratorRole,
   isSupabaseConfigured,
+  luandaInputToUtcIso,
   resolveAdAdvertiserType,
+  resolveAdLifecycleState,
+  sortBannersForCarousel,
   storeHasActivePaidPlan,
-  translateErrorMessage,
   uploadMediaFile,
+  utcIsoToLuandaInput,
   validateSafeAdDestination,
 } from "@mercado-uige/shared";
 import { PaginationBar, TableToolbar } from "./TableControls";
@@ -859,13 +880,21 @@ export const PaymentsSection: React.FC<{
 };
 
 /* -------------------------------------------------------------------------- */
-/* 4. ANÚNCIOS (PLATAFORMA, EXTERNO SEM LOJA E LOJA COM PLANO PAGO)           */
+/* 4. BANNERS E PUBLICIDADE (PLATAFORMA, EXTERNO SEM LOJA E LOJA COM PLANO PAGO) */
 /* -------------------------------------------------------------------------- */
 export interface AdminAdFormPayload {
   advertiserType: AdAdvertiserType;
   advertiserName?: string;
   title: string;
   subtitle: string;
+  description?: string;
+  ctaText?: string;
+  linkUrl?: string;
+  order?: number;
+  bannerCategory?: BannerCategory;
+  priority?: number;
+  durationSec?: number | null;
+  isPaid?: boolean;
   storeId?: string;
   productId?: string;
   destinationType: AdDestinationType;
@@ -874,8 +903,10 @@ export interface AdminAdFormPayload {
   mediaType: "imagem" | "video";
   imageUrl: string;
   videoUrl?: string;
-  startDate: string;
-  endDate: string;
+  startDate: string | null;
+  endDate: string | null;
+  status?: SponsoredAd["status"];
+  statusReason?: string | null;
   paymentAmountKz?: number;
   paymentMethod?: MerchantPayment["method"];
   paymentReference?: string;
@@ -887,7 +918,7 @@ function formatPositionLabel(pos: AdPosition): string {
     case "faixa":
       return "Faixa inferior";
     case "topo":
-      return "Topo (Início)";
+      return "Carrossel Início (Topo)";
     case "categoria":
       return "Categorias";
     case "pesquisa":
@@ -906,27 +937,41 @@ function formatAdvertiserLabel(ad: SponsoredAd): string {
   return "Loja";
 }
 
+function formatBannerCategoryLabel(cat?: BannerCategory): string {
+  if (cat === "publico") return "Público";
+  if (cat === "promocional") return "Promocional";
+  return "Patrocinado";
+}
+
 export const AdsSection: React.FC<{
   ads: SponsoredAd[];
   stores: Store[];
   products?: Product[];
   defaultAdvertiserType?: AdAdvertiserType;
+  defaultBannerDurationSec?: number;
   onCreateAd: (payload: AdminAdFormPayload) => Promise<void>;
   onUpdateAd?: (id: string, payload: AdminAdFormPayload) => Promise<void>;
   onToggleAd: (ad: SponsoredAd, nextActive: boolean) => void;
+  onReviewAd?: (ad: SponsoredAd, status: "aprovado" | "rejeitado") => void;
+  onSuspendAd?: (ad: SponsoredAd, suspended: boolean) => void;
+  onReorderAd?: (ad: SponsoredAd, delta: -1 | 1) => void;
   onDeleteAd: (ad: SponsoredAd) => void;
 }> = ({
   ads,
   stores,
   products = [],
   defaultAdvertiserType = "plataforma",
+  defaultBannerDurationSec = 8,
   onCreateAd,
   onUpdateAd,
   onToggleAd,
+  onReviewAd,
+  onSuspendAd,
+  onReorderAd,
   onDeleteAd,
 }) => {
-  const todayIso = () => new Date().toISOString().slice(0, 10);
-  const plusDaysIso = (d: number) => new Date(Date.now() + d * 86400000).toISOString().slice(0, 10);
+  const defaultEndLuanda = () =>
+    utcIsoToLuandaInput(new Date(Date.now() + 15 * 86400000).toISOString());
 
   const formRef = useRef<HTMLFormElement | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
@@ -934,6 +979,7 @@ export const AdsSection: React.FC<{
   const paidStores = useMemo(() => stores.filter((s) => storeHasActivePaidPlan(s)), [stores]);
   const activeStores = useMemo(() => stores.filter((s) => s.isApproved && !s.isSuspended), [stores]);
   const approvedProducts = useMemo(() => products.filter((p) => p.isApproved !== false), [products]);
+  const stats = useMemo(() => computeBannerDashboardStats(ads, Date.now(), stores), [ads, stores]);
 
   const [editingAdId, setEditingAdId] = useState<string | null>(null);
   const [advertiserType, setAdvertiserType] = useState<AdAdvertiserType>(defaultAdvertiserType);
@@ -942,18 +988,28 @@ export const AdsSection: React.FC<{
   );
   const [title, setTitle] = useState("");
   const [subtitle, setSubtitle] = useState("");
+  const [ctaText, setCtaText] = useState("Ver oferta");
+  const [bannerCategory, setBannerCategory] = useState<BannerCategory>(
+    defaultAdvertiserType === "plataforma" ? "publico" : "patrocinado"
+  );
+  const [order, setOrder] = useState("0");
+  const [priority, setPriority] = useState("0");
+  const [durationSec, setDurationSec] = useState("");
+  const [isPaid, setIsPaid] = useState(defaultAdvertiserType !== "plataforma");
   const [storeId, setStoreId] = useState("");
   const [productId, setProductId] = useState("");
   const [destinationType, setDestinationType] = useState<AdDestinationType>(
     defaultAdvertiserType === "loja" ? "loja" : "link"
   );
   const [destinationValue, setDestinationValue] = useState("");
-  const [position, setPosition] = useState<AdPosition>("faixa");
+  const [position, setPosition] = useState<AdPosition>("topo");
   const [mediaType, setMediaType] = useState<"imagem" | "video">("imagem");
   const [imageUrl, setImageUrl] = useState("");
   const [videoUrl, setVideoUrl] = useState("");
-  const [startDate, setStartDate] = useState(todayIso);
-  const [endDate, setEndDate] = useState(() => plusDaysIso(15));
+  const [noDates, setNoDates] = useState(false);
+  const [startLuanda, setStartLuanda] = useState(() => getNowLuandaInput());
+  const [endLuanda, setEndLuanda] = useState(defaultEndLuanda);
+  const [statusReason, setStatusReason] = useState("");
 
   // Pagamento de anunciante externo (registado em Pagamentos)
   const [paymentAmountKz, setPaymentAmountKz] = useState("");
@@ -962,93 +1018,131 @@ export const AdsSection: React.FC<{
   const [paymentProofUrl, setPaymentProofUrl] = useState("");
 
   const [uploadingMedia, setUploadingMedia] = useState(false);
-  const [mediaError, setMediaError] = useState("");
+  const [mediaError, setMediaError] = useState<ServerErrorDetail | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   const [search, setSearch] = useState("");
   const [posFilter, setPosFilter] = useState("todos");
+  const [statusFilter, setStatusFilter] = useState("todos");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return ads.filter((a) => {
+    const now = Date.now();
+    return sortBannersForCarousel(ads).filter((a) => {
       if (posFilter !== "todos" && a.position !== posFilter) return false;
+      const lifecycle = resolveAdLifecycleState(a, stores, now);
+      if (statusFilter === "activos" && lifecycle.key !== "activo") return false;
+      if (statusFilter === "agendados" && lifecycle.key !== "agendado") return false;
+      if (statusFilter === "rascunhos" && lifecycle.key !== "rascunho") return false;
+      if (statusFilter === "pendentes" && lifecycle.key !== "pendente") return false;
+      if (statusFilter === "expirados" && lifecycle.key !== "expirado") return false;
+      if (statusFilter === "suspensos" && lifecycle.key !== "suspenso" && lifecycle.key !== "rejeitado") return false;
+      if (statusFilter === "pagos" && !isBannerPaid(a)) return false;
+      if (statusFilter === "gratuitos" && isBannerPaid(a)) return false;
+
       if (q) {
         return (
           a.title.toLowerCase().includes(q) ||
+          (a.description || a.subtitle || "").toLowerCase().includes(q) ||
           (a.advertiserName || "").toLowerCase().includes(q) ||
-          (a.storeName || "").toLowerCase().includes(q)
+          (a.storeName || "").toLowerCase().includes(q) ||
+          lifecycle.label.toLowerCase().includes(q) ||
+          lifecycle.reason.toLowerCase().includes(q)
         );
       }
       return true;
     });
-  }, [ads, search, posFilter]);
+  }, [ads, stores, search, posFilter, statusFilter]);
 
   const paged = useMemo(() => filtered.slice((page - 1) * pageSize, page * pageSize), [filtered, page, pageSize]);
 
   const resetForm = () => {
     setEditingAdId(null);
-    setAdvertiserType("plataforma");
-    setAdvertiserName("Mercado Uíge");
+    setAdvertiserType(defaultAdvertiserType);
+    setAdvertiserName(defaultAdvertiserType === "plataforma" ? "Mercado Uíge" : "");
     setTitle("");
     setSubtitle("");
+    setCtaText("Ver oferta");
+    setBannerCategory(defaultAdvertiserType === "plataforma" ? "publico" : "patrocinado");
+    setOrder("0");
+    setPriority("0");
+    setDurationSec("");
+    setIsPaid(defaultAdvertiserType !== "plataforma");
     setStoreId("");
     setProductId("");
-    setDestinationType("loja");
+    setDestinationType(defaultAdvertiserType === "loja" ? "loja" : "link");
     setDestinationValue("");
-    setPosition("faixa");
+    setPosition("topo");
     setMediaType("imagem");
     setImageUrl("");
     setVideoUrl("");
-    setStartDate(todayIso());
-    setEndDate(plusDaysIso(15));
+    setNoDates(false);
+    setStartLuanda(getNowLuandaInput());
+    setEndLuanda(defaultEndLuanda());
+    setStatusReason("");
     setPaymentAmountKz("");
     setPaymentMethod("Transferência");
     setPaymentReference("");
     setPaymentProofUrl("");
-    setMediaError("");
+    setMediaError(null);
   };
 
   const handleSelectAdvertiserType = (nextType: AdAdvertiserType) => {
     setAdvertiserType(nextType);
-    setMediaError("");
+    setMediaError(null);
     if (nextType === "plataforma") {
       setAdvertiserName("Mercado Uíge");
       setStoreId("");
+      setBannerCategory("publico");
+      setIsPaid(false);
     } else if (nextType === "externo") {
       setAdvertiserName(advertiserName === "Mercado Uíge" ? "" : advertiserName);
       setStoreId("");
+      setBannerCategory("patrocinado");
+      setIsPaid(true);
       if (destinationType === "loja") {
         setDestinationType("link");
       }
     } else {
       setDestinationType("loja");
+      setBannerCategory("patrocinado");
+      setIsPaid(true);
     }
   };
 
   const handleStartEdit = (ad: SponsoredAd) => {
     const type = resolveAdAdvertiserType(ad);
+    const hasDates = Boolean(ad.startDate || ad.endDate);
     setEditingAdId(ad.id);
     setAdvertiserType(type);
     setAdvertiserName(
       ad.advertiserName || (type === "plataforma" ? "Mercado Uíge" : ad.storeName || "")
     );
     setTitle(ad.title || "");
-    setSubtitle(ad.subtitle || "");
+    setSubtitle(ad.description ?? ad.subtitle ?? "");
+    setCtaText(ad.ctaText || "Ver oferta");
+    setBannerCategory(ad.bannerCategory || (type === "plataforma" ? "publico" : "patrocinado"));
+    setOrder(String(ad.order ?? 0));
+    setPriority(String(ad.priority ?? 0));
+    setDurationSec(ad.durationSec ? String(ad.durationSec) : "");
+    setIsPaid(isBannerPaid(ad));
     setStoreId(ad.storeId || "");
     setProductId(ad.productId || "");
     setDestinationType(ad.destinationType || (ad.productId ? "produto" : "loja"));
-    setDestinationValue(ad.destinationValue || ad.storeId || ad.productId || "");
+    setDestinationValue(ad.destinationValue || ad.linkUrl || ad.storeId || ad.productId || "");
     setPosition(ad.position || "topo");
     setMediaType(ad.mediaType === "video" ? "video" : "imagem");
     setImageUrl(ad.imageUrl || "");
     setVideoUrl(ad.videoUrl || "");
-    setStartDate((ad.startDate || todayIso()).slice(0, 10));
-    setEndDate((ad.endDate || plusDaysIso(15)).slice(0, 10));
+    setNoDates(!hasDates);
+    setStartLuanda(ad.startDate ? utcIsoToLuandaInput(ad.startDate) : getNowLuandaInput());
+    setEndLuanda(ad.endDate ? utcIsoToLuandaInput(ad.endDate) : "");
+    setStatusReason(ad.statusReason || "");
     setPaymentAmountKz(ad.paymentAmountKz ? String(ad.paymentAmountKz) : "");
     setPaymentProofUrl(ad.paymentProofUrl || "");
-    setMediaError("");
+    setMediaError(null);
     formRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
   };
 
@@ -1059,27 +1153,29 @@ export const AdsSection: React.FC<{
   };
 
   const handleUploadAdImage = async (file: File) => {
-    setMediaError("");
+    setMediaError(null);
     setUploadingMedia(true);
     try {
-      const { blob, dataUrl } = await compressImage(file);
+      const { blob, dataUrl } = await compressBannerImage(file);
       if (isSupabaseConfigured && navigator.onLine) {
-        const res = await uploadMediaFile(blob, file.name || `ad_${Date.now()}.jpg`, "anuncios");
+        const res = await uploadMediaFile(blob, file.name || `banner_1200x500_${Date.now()}.jpg`, "anuncios");
         if (res.error) throw res.error;
-        if (!res.url) throw new Error("Não foi possível obter o URL público da imagem.");
+        if (!res.url) throw new Error("O servidor não devolveu o URL público da imagem.");
         setImageUrl(res.url);
       } else {
         setImageUrl(dataUrl);
       }
     } catch (err: unknown) {
-      setMediaError(translateErrorMessage(err, "Falha ao carregar imagem do anúncio. Verifica o ficheiro e a ligação."));
+      setMediaError(
+        extractServerErrorDetail(err, "Falha ao carregar imagem do banner (1200x500). Verifica o ficheiro e a ligação.")
+      );
     } finally {
       setUploadingMedia(false);
     }
   };
 
   const handleUploadAdVideo = async (file: File) => {
-    setMediaError("");
+    setMediaError(null);
     setUploadingMedia(true);
     try {
       const { blob, previewUrl } = await compressVideoOnDevice(file, {
@@ -1090,14 +1186,14 @@ export const AdsSection: React.FC<{
       if (isSupabaseConfigured && navigator.onLine) {
         const res = await uploadMediaFile(blob, `ad_video_${Date.now()}.webm`, "anuncios");
         if (res.error) throw res.error;
-        if (!res.url) throw new Error("Não foi possível obter o URL público do vídeo.");
+        if (!res.url) throw new Error("O servidor não devolveu o URL público do vídeo.");
         setVideoUrl(res.url);
       } else {
         setVideoUrl(previewUrl);
       }
     } catch (err: unknown) {
       setMediaError(
-        translateErrorMessage(
+        extractServerErrorDetail(
           err,
           "Falha ao carregar vídeo (máx. 30 s e 20 MB). Verifica o ficheiro e tenta novamente."
         )
@@ -1108,40 +1204,48 @@ export const AdsSection: React.FC<{
   };
 
   const handleUploadExternalProof = async (file: File) => {
-    setMediaError("");
+    setMediaError(null);
     setUploadingMedia(true);
     try {
       const { blob, dataUrl } = await compressImage(file);
       if (isSupabaseConfigured && navigator.onLine) {
         const res = await uploadMediaFile(blob, file.name || `comprovativo_${Date.now()}.jpg`, "comprovativos");
         if (res.error) throw res.error;
-        if (!res.url) throw new Error("Não foi possível obter o URL do comprovativo.");
+        if (!res.url) throw new Error("O servidor não devolveu o URL do comprovativo.");
         setPaymentProofUrl(res.url);
       } else {
         setPaymentProofUrl(dataUrl);
       }
     } catch (err: unknown) {
-      setMediaError(translateErrorMessage(err, "Falha ao carregar o comprovativo do anunciante."));
+      setMediaError(extractServerErrorDetail(err, "Falha ao carregar o comprovativo do anunciante."));
     } finally {
       setUploadingMedia(false);
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setMediaError("");
+  const submitAd = async (desiredStatus: "aprovado" | "rascunho", opts?: { publishNow?: boolean }) => {
+    setMediaError(null);
     if (!title.trim()) {
-      setMediaError("Indica o título da campanha.");
+      setMediaError({ message: "Indica o título do banner.", code: null });
       return;
     }
 
     if (advertiserType === "externo" && !advertiserName.trim()) {
-      setMediaError("Indica o nome do anunciante externo.");
+      setMediaError({ message: "Indica o nome do anunciante externo.", code: null });
       return;
     }
 
     if (advertiserType === "loja" && !storeId) {
-      setMediaError("Seleciona uma loja com plano pago activo.");
+      setMediaError({ message: "Seleciona uma loja com plano pago activo.", code: null });
+      return;
+    }
+
+    const parsedDuration = durationSec.trim() ? Number(durationSec.trim()) : null;
+    if (parsedDuration !== null && (!Number.isFinite(parsedDuration) || parsedDuration < 3 || parsedDuration > 60)) {
+      setMediaError({
+        message: "A duração do banner deve ficar entre 3 e 60 segundos (ou vazio para usar o padrão global).",
+        code: null,
+      });
       return;
     }
 
@@ -1154,17 +1258,34 @@ export const AdsSection: React.FC<{
       productId: effectiveProductId,
     });
     if (!destCheck.ok) {
-      setMediaError(destCheck.error || "Destino de anúncio inválido.");
+      setMediaError({ message: destCheck.error || "Destino do banner inválido.", code: null });
       return;
     }
 
     if (mediaType === "video" && !videoUrl.trim()) {
-      setMediaError("Carrega ou cola o link do vídeo promocional.");
+      setMediaError({ message: "Carrega ou cola o link do vídeo promocional.", code: null });
       return;
     }
 
-    if (new Date(endDate).getTime() < new Date(startDate).getTime()) {
-      setMediaError("A data de fim deve ser igual ou posterior à data de início.");
+    let resolvedStartIso: string | null = null;
+    let resolvedEndIso: string | null = null;
+
+    if (opts?.publishNow) {
+      const nowIso = new Date().toISOString();
+      setNoDates(false);
+      setStartLuanda(getNowLuandaInput());
+      resolvedStartIso = nowIso;
+      resolvedEndIso = endLuanda.trim() ? luandaInputToUtcIso(endLuanda) : null;
+    } else if (!noDates) {
+      resolvedStartIso = luandaInputToUtcIso(startLuanda);
+      resolvedEndIso = luandaInputToUtcIso(endLuanda);
+    }
+
+    if (resolvedStartIso && resolvedEndIso && new Date(resolvedEndIso).getTime() < new Date(resolvedStartIso).getTime()) {
+      setMediaError({
+        message: "A data/hora de fim (Africa/Luanda) deve ser igual ou posterior ao início.",
+        code: null,
+      });
       return;
     }
 
@@ -1173,6 +1294,7 @@ export const AdsSection: React.FC<{
       imageUrl.trim() ||
       (advertiserType === "loja" ? selectedStore?.facadeImage || selectedStore?.logo || "" : "");
 
+    const cleanDescription = subtitle.trim();
     const payload: AdminAdFormPayload = {
       advertiserType,
       advertiserName:
@@ -1182,7 +1304,15 @@ export const AdsSection: React.FC<{
           ? advertiserName.trim()
           : selectedStore?.name,
       title: title.trim(),
-      subtitle: subtitle.trim(),
+      subtitle: cleanDescription,
+      description: cleanDescription,
+      ctaText: ctaText.trim() || "Ver oferta",
+      linkUrl: destinationType === "link" ? destCheck.normalizedValue || destinationValue.trim() : undefined,
+      order: Number.isFinite(Number(order)) ? Number(order) : 0,
+      priority: Number.isFinite(Number(priority)) ? Number(priority) : 0,
+      bannerCategory,
+      durationSec: parsedDuration !== null ? clampBannerDurationSec(parsedDuration, defaultBannerDurationSec) : null,
+      isPaid,
       storeId: effectiveStoreId || undefined,
       productId: effectiveProductId || undefined,
       destinationType,
@@ -1191,8 +1321,10 @@ export const AdsSection: React.FC<{
       mediaType,
       imageUrl: resolvedImage,
       videoUrl: mediaType === "video" ? videoUrl.trim() : undefined,
-      startDate: new Date(`${startDate}T00:00:00`).toISOString(),
-      endDate: new Date(`${endDate}T23:59:59`).toISOString(),
+      startDate: resolvedStartIso,
+      endDate: resolvedEndIso,
+      status: desiredStatus,
+      statusReason: statusReason.trim() || null,
       paymentAmountKz:
         advertiserType === "externo" && Number(paymentAmountKz) > 0
           ? Number(paymentAmountKz)
@@ -1211,10 +1343,15 @@ export const AdsSection: React.FC<{
       }
       resetForm();
     } catch (err: unknown) {
-      setMediaError(translateErrorMessage(err, "Não foi possível guardar o anúncio."));
+      setMediaError(extractServerErrorDetail(err, "Erro ao gravar banner no servidor."));
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitAd("aprovado");
   };
 
   const previewSponsorName =
@@ -1232,6 +1369,50 @@ export const AdsSection: React.FC<{
 
   return (
     <div className="space-y-4 anim-fadeUp">
+      {/* Indicadores de desempenho e distribuição de banners */}
+      <div className="grid grid-cols-2 sm:grid-cols-5 lg:grid-cols-10 gap-2.5 text-xs">
+        <div className="p-3 rounded-xl bg-[#172338] border border-[#26354B]">
+          <span className="text-[10px] text-[#A6B2C5] uppercase font-bold block">Activos</span>
+          <span className="text-lg font-black text-emerald-400 tabular-nums">{stats.activos}</span>
+        </div>
+        <div className="p-3 rounded-xl bg-[#172338] border border-[#26354B]">
+          <span className="text-[10px] text-[#A6B2C5] uppercase font-bold block">Agendados</span>
+          <span className="text-lg font-black text-blue-300 tabular-nums">{stats.agendados}</span>
+        </div>
+        <div className="p-3 rounded-xl bg-[#172338] border border-[#26354B]">
+          <span className="text-[10px] text-[#A6B2C5] uppercase font-bold block">Rascunhos</span>
+          <span className="text-lg font-black text-slate-300 tabular-nums">{stats.rascunhos}</span>
+        </div>
+        <div className="p-3 rounded-xl bg-[#172338] border border-[#26354B]">
+          <span className="text-[10px] text-[#A6B2C5] uppercase font-bold block">Pendentes</span>
+          <span className="text-lg font-black text-amber-300 tabular-nums">{stats.pendentes}</span>
+        </div>
+        <div className="p-3 rounded-xl bg-[#172338] border border-[#26354B]">
+          <span className="text-[10px] text-[#A6B2C5] uppercase font-bold block">Expirados</span>
+          <span className="text-lg font-black text-slate-300 tabular-nums">{stats.expirados}</span>
+        </div>
+        <div className="p-3 rounded-xl bg-[#172338] border border-[#26354B]">
+          <span className="text-[10px] text-[#A6B2C5] uppercase font-bold block">Pagos</span>
+          <span className="text-lg font-black text-[#246BFD] tabular-nums">{stats.pagos}</span>
+        </div>
+        <div className="p-3 rounded-xl bg-[#172338] border border-[#26354B]">
+          <span className="text-[10px] text-[#A6B2C5] uppercase font-bold block">Gratuitos</span>
+          <span className="text-lg font-black text-[#B7F34A] tabular-nums">{stats.gratuitos}</span>
+        </div>
+        <div className="p-3 rounded-xl bg-[#172338] border border-[#26354B]">
+          <span className="text-[10px] text-[#A6B2C5] uppercase font-bold block">Visualizações</span>
+          <span className="text-lg font-black text-white tabular-nums">{stats.totalViews}</span>
+        </div>
+        <div className="p-3 rounded-xl bg-[#172338] border border-[#26354B]">
+          <span className="text-[10px] text-[#A6B2C5] uppercase font-bold block">Cliques</span>
+          <span className="text-lg font-black text-white tabular-nums">{stats.totalClicks}</span>
+        </div>
+        <div className="p-3 rounded-xl bg-[#172338] border border-[#26354B]">
+          <span className="text-[10px] text-[#A6B2C5] uppercase font-bold block">Taxa de cliques</span>
+          <span className="text-lg font-black text-[#B7F34A] tabular-nums">{stats.ctrPercent}%</span>
+        </div>
+      </div>
+
       <form
         ref={formRef}
         onSubmit={handleSubmit}
@@ -1240,10 +1421,10 @@ export const AdsSection: React.FC<{
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h3 className="font-black text-sm text-white">
-              {editingAdId ? "Editar Anúncio" : "Novo Anúncio"}
+              {editingAdId ? "Editar / Substituir Banner" : "Novo Banner / Publicidade"}
             </h3>
             <p className="text-[11px] text-[#A6B2C5]">
-              Cria anúncios da plataforma Mercado Uíge, de anunciantes externos (sem loja) ou de lojas com plano pago activo.
+              Carrega banners (comprimidos em 1200x500), ordena por prioridade e gere campanhas gratuitas ou patrocinadas.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
@@ -1254,7 +1435,7 @@ export const AdsSection: React.FC<{
                 mediaType === "imagem" ? "bg-[#246BFD] text-white" : "bg-[#111D30] text-[#A6B2C5] border border-[#26354B]"
               }`}
             >
-              <ImageIcon size={13} /> Imagem
+              <ImageIcon size={13} /> Imagem (1200x500)
             </button>
             <button
               type="button"
@@ -1303,7 +1484,7 @@ export const AdsSection: React.FC<{
           </div>
         </div>
 
-        {/* 2. Identificação, Título, Subtítulo e Posição */}
+        {/* 2. Conteúdo do Banner (Título, Descrição, Texto do Botão, Posição) */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           <input
             ref={titleInputRef}
@@ -1311,47 +1492,23 @@ export const AdsSection: React.FC<{
             required
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="Título da campanha *"
+            placeholder="Título do banner *"
             className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
           />
           <input
             type="text"
             value={subtitle}
             onChange={(e) => setSubtitle(e.target.value)}
-            placeholder="Subtítulo promocional"
+            placeholder="Descrição do banner"
             className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
           />
-
-          {advertiserType === "loja" ? (
-            <select
-              required
-              value={storeId}
-              onChange={(e) => setStoreId(e.target.value)}
-              className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-            >
-              <option value="">
-                {paidStores.length === 0 ? "Sem lojas com plano pago activo" : "Selecionar loja (plano pago) *"}
-              </option>
-              {paidStores.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name} ({s.code || "LJ"} · {formatPlanType(s.planType)})
-                </option>
-              ))}
-            </select>
-          ) : (
-            <input
-              type="text"
-              required={advertiserType === "externo"}
-              value={advertiserName}
-              onChange={(e) => setAdvertiserName(e.target.value)}
-              placeholder={
-                advertiserType === "plataforma"
-                  ? "Nome exibido (Mercado Uíge)"
-                  : "Nome do anunciante externo *"
-              }
-              className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
-            />
-          )}
+          <input
+            type="text"
+            value={ctaText}
+            onChange={(e) => setCtaText(e.target.value)}
+            placeholder="Texto do botão (ex: Ver oferta)"
+            className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
+          />
 
           <select
             aria-label="Posição do anúncio"
@@ -1359,16 +1516,122 @@ export const AdsSection: React.FC<{
             onChange={(e) => setPosition(e.target.value as AdPosition)}
             className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
           >
+            <option value="topo">Posição: Carrossel Início (Topo)</option>
             <option value="faixa">Posição: Faixa acima da barra</option>
-            <option value="topo">Posição: Topo (Início)</option>
             <option value="categoria">Posição: Categorias</option>
             <option value="pesquisa">Posição: Pesquisa</option>
             <option value="ecra_inteiro">Posição: Ecrã inteiro</option>
           </select>
         </div>
 
-        {/* 3. Destino e Datas */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
+        {/* 3. Categoria, Ordem, Prioridade, Duração, Modelo Pago vs Gratuito */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+          <div>
+            <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">Categoria do Banner</label>
+            <select
+              aria-label="Categoria do banner"
+              value={bannerCategory}
+              onChange={(e) => {
+                const nextCat = e.target.value as BannerCategory;
+                setBannerCategory(nextCat);
+                if (nextCat === "publico") setIsPaid(false);
+                if (nextCat === "patrocinado") setIsPaid(true);
+              }}
+              className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+            >
+              <option value="publico">Público (Plataforma)</option>
+              <option value="patrocinado">Patrocinado</option>
+              <option value="promocional">Promocional</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">Ordem (0 = primeiro)</label>
+            <input
+              type="number"
+              min={0}
+              value={order}
+              onChange={(e) => setOrder(e.target.value)}
+              className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">Prioridade (maior = topo)</label>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={priority}
+              onChange={(e) => setPriority(e.target.value)}
+              className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">
+              Duração (s) · vazio = padrão ({defaultBannerDurationSec}s)
+            </label>
+            <input
+              type="number"
+              min={3}
+              max={60}
+              value={durationSec}
+              onChange={(e) => setDurationSec(e.target.value)}
+              placeholder={`Padrão (${defaultBannerDurationSec}s)`}
+              className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+            />
+          </div>
+
+          <label className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] flex items-center justify-between gap-2 cursor-pointer">
+            <span className="font-bold text-white">Banner pago</span>
+            <input
+              type="checkbox"
+              checked={isPaid}
+              onChange={(e) => setIsPaid(e.target.checked)}
+              className="w-4 h-4 accent-[#B7F34A] cursor-pointer"
+            />
+          </label>
+        </div>
+
+        {/* 4. Loja/Anunciante, Destino e Datas */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+          <div>
+            <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">
+              {advertiserType === "loja" ? "Loja Anunciante *" : "Nome do Anunciante"}
+            </label>
+            {advertiserType === "loja" ? (
+              <select
+                required
+                value={storeId}
+                onChange={(e) => setStoreId(e.target.value)}
+                className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+              >
+                <option value="">
+                  {paidStores.length === 0 ? "Sem lojas com plano pago activo" : "Selecionar loja (plano pago) *"}
+                </option>
+                {paidStores.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.code || "LJ"} · {formatPlanType(s.planType)})
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="text"
+                required={advertiserType === "externo"}
+                value={advertiserName}
+                onChange={(e) => setAdvertiserName(e.target.value)}
+                placeholder={
+                  advertiserType === "plataforma"
+                    ? "Nome exibido (Mercado Uíge)"
+                    : "Nome do anunciante externo *"
+                }
+                className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
+              />
+            )}
+          </div>
+
           <div>
             <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">Tipo de Destino</label>
             <select
@@ -1376,7 +1639,7 @@ export const AdsSection: React.FC<{
               value={destinationType}
               onChange={(e) => {
                 setDestinationType(e.target.value as AdDestinationType);
-                setMediaError("");
+                setMediaError(null);
               }}
               className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
             >
@@ -1436,41 +1699,74 @@ export const AdsSection: React.FC<{
             )}
           </div>
 
-          <div>
-            <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">Data de início</label>
-            <input
-              type="date"
-              required
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-            />
-          </div>
+          <div className="lg:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">
+                Início (Africa/Luanda · UTC+1)
+              </label>
+              <input
+                type="datetime-local"
+                disabled={noDates}
+                value={startLuanda}
+                onChange={(e) => setStartLuanda(e.target.value)}
+                className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none disabled:opacity-45"
+              />
+            </div>
 
+            <div>
+              <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">
+                Fim (Africa/Luanda · UTC+1)
+              </label>
+              <input
+                type="datetime-local"
+                disabled={noDates}
+                value={endLuanda}
+                onChange={(e) => setEndLuanda(e.target.value)}
+                className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none disabled:opacity-45"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-center p-3 rounded-xl bg-[#111D30] border border-[#26354B]">
+          <div className="space-y-1">
+            <label className="inline-flex items-center gap-2 font-bold text-white cursor-pointer">
+              <input
+                type="checkbox"
+                checked={noDates}
+                onChange={(e) => setNoDates(e.target.checked)}
+                className="w-4 h-4 accent-[#B7F34A] cursor-pointer"
+              />
+              <span>Sem datas (no ar continuamente até pausar)</span>
+            </label>
+            <p className="text-[11px] text-[#A6B2C5] flex items-center gap-1">
+              <Clock size={12} className="text-[#246BFD] shrink-0" />
+              Hora escolhida em Africa/Luanda (UTC+1), gravada em UTC na base de dados e comparada com now().
+            </p>
+          </div>
           <div>
-            <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">Data de fim</label>
             <input
-              type="date"
-              required
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
+              type="text"
+              value={statusReason}
+              onChange={(e) => setStatusReason(e.target.value)}
+              placeholder="Nota / motivo do estado (opcional — ex.: campanha de natal ou pausa técnica)"
+              className="w-full p-2.5 rounded-xl bg-[#07111F] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
             />
           </div>
         </div>
 
-        {/* 4. Mídia (Upload de Imagem ou Vídeo) */}
+        {/* 5. Mídia (Imagem 1200x500 ou Vídeo) */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-end">
           <div className="flex gap-2 items-center">
             <input
               type="text"
               value={imageUrl}
               onChange={(e) => setImageUrl(e.target.value)}
-              placeholder={mediaType === "video" ? "Capa/poster (opcional)" : "URL ou carregar imagem"}
+              placeholder={mediaType === "video" ? "Capa/poster (opcional)" : "URL ou carregar imagem (1200x500)"}
               className="flex-1 min-w-0 p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
             />
             <label className="px-3 py-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-[#B7F34A] font-bold cursor-pointer inline-flex items-center gap-1 shrink-0">
-              <Upload size={13} /> Foto
+              <Upload size={13} /> {imageUrl ? "Substituir foto" : "Foto 1200x500"}
               <input
                 type="file"
                 accept="image/*"
@@ -1515,7 +1811,7 @@ export const AdsSection: React.FC<{
           )}
         </div>
 
-        {/* 5. Pagamento de Anunciante Externo -> Pagamentos */}
+        {/* 6. Pagamento de Anunciante Externo -> Pagamentos */}
         {advertiserType === "externo" && !editingAdId && (
           <div className="p-3 rounded-xl bg-[#111D30] border border-[#26354B] space-y-2">
             <span className="font-bold text-[#B7F34A] block">
@@ -1572,30 +1868,40 @@ export const AdsSection: React.FC<{
           </div>
         )}
 
-        {/* 6. Pré-visualização ao vivo */}
+        {/* 7. Pré-visualização ao vivo */}
         <div
           data-testid="admin-ad-preview"
           className="p-3 rounded-xl bg-[#07111F] border border-[#246BFD]/35 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
         >
           <div className="space-y-1 min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-1.5">
-              <span className="px-2 py-0.5 rounded bg-[#B7F34A] text-slate-950 font-black text-[10px] uppercase">
-                Patrocinado
-              </span>
+              {isPaid ? (
+                <span className="px-2 py-0.5 rounded bg-white/15 border border-white/20 text-white font-bold text-[10px]">
+                  Patrocinado
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 rounded bg-[#B7F34A] text-slate-950 font-black text-[10px]">
+                  {formatBannerCategoryLabel(bannerCategory)} (Gratuito)
+                </span>
+              )}
               <span className="text-[11px] font-bold text-[#A6B2C5]">
-                Pré-visualização · {previewSponsorName} · {formatPositionLabel(position)}
+                Pré-visualização · {previewSponsorName} · {formatPositionLabel(position)} ·{" "}
+                {durationSec.trim() ? `${durationSec.trim()}s` : `${defaultBannerDurationSec}s padrão`}
               </span>
             </div>
             <p className="font-black text-sm text-white truncate">
-              {title.trim() || "Título do teu anúncio"}
+              {title.trim() || "Título do teu banner"}
             </p>
             {subtitle.trim() && (
               <p className="text-[11px] text-[#A6B2C5] truncate">{subtitle.trim()}</p>
             )}
+            <span className="inline-block px-2.5 py-1 rounded-lg bg-[#B7F34A] text-slate-950 font-black text-[11px]">
+              {ctaText.trim() || "Ver oferta"}
+            </span>
           </div>
 
           {(mediaType === "video" ? videoUrl.trim() : previewPoster) && (
-            <div className="w-full sm:w-44 h-24 rounded-lg overflow-hidden bg-[#111D30] border border-[#26354B] shrink-0">
+            <div className="w-full sm:w-52 aspect-[12/5] rounded-lg overflow-hidden bg-[#111D30] border border-[#26354B] shrink-0">
               {mediaType === "video" && videoUrl.trim() ? (
                 <video
                   src={videoUrl.trim()}
@@ -1608,7 +1914,7 @@ export const AdsSection: React.FC<{
               ) : (
                 <img
                   src={previewPoster}
-                  alt="Pré-visualização do anúncio"
+                  alt="Pré-visualização do banner"
                   className="w-full h-full object-cover"
                 />
               )}
@@ -1620,42 +1926,63 @@ export const AdsSection: React.FC<{
           <span className="text-[11px] text-[#A6B2C5]">
             {mediaType === "video"
               ? "Em vídeo: autoplay sem som com controlo de som; em dados móveis exibe só a capa com botão Reproduzir."
-              : "Apenas links externos seguros com https:// são aceites."}
+              : "Imagens carregadas são comprimidas automaticamente em 1200x500 px."}
           </span>
-          <button
-            type="submit"
-            disabled={submitting || uploadingMedia || (advertiserType === "loja" && paidStores.length === 0)}
-            className="px-4 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
-          >
-            <Plus size={14} />
-            {uploadingMedia
-              ? "A processar ficheiro…"
-              : submitting
-              ? "A guardar…"
-              : editingAdId
-              ? "Guardar Alterações"
-              : mediaType === "video"
-              ? "Publicar Anúncio em Vídeo"
-              : "Publicar Anúncio"}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={submitting || uploadingMedia || (advertiserType === "loja" && paidStores.length === 0)}
+              onClick={() => submitAd("rascunho")}
+              className="px-3.5 py-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-slate-200 font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <Save size={14} /> Guardar Rascunho
+            </button>
+            <button
+              type="button"
+              disabled={submitting || uploadingMedia || (advertiserType === "loja" && paidStores.length === 0)}
+              onClick={() => submitAd("aprovado", { publishNow: true })}
+              className="px-3.5 py-2.5 rounded-xl bg-[#246BFD] text-white font-black flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <Send size={14} /> Publicar agora
+            </button>
+            <button
+              type="submit"
+              disabled={submitting || uploadingMedia || (advertiserType === "loja" && paidStores.length === 0)}
+              className="px-4 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <Plus size={14} />
+              {uploadingMedia
+                ? "A processar ficheiro…"
+                : submitting
+                ? "A guardar…"
+                : editingAdId
+                ? "Guardar Alterações"
+                : mediaType === "video"
+                ? "Publicar Banner em Vídeo"
+                : "Publicar Banner"}
+            </button>
+          </div>
         </div>
 
         {mediaError && (
-          <div className="p-2.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 font-bold text-xs">
-            {mediaError}
+          <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/35 text-red-300 text-xs space-y-1">
+            <p className="font-bold">{mediaError.message}</p>
+            {mediaError.code && (
+              <p className="text-[10px] font-mono text-red-400/90">Código técnico: {mediaError.code}</p>
+            )}
           </div>
         )}
       </form>
 
       <TableToolbar
-        title="Anúncios Patrocinados"
-        subtitle="Controlo de campanhas da plataforma, anunciantes externos e lojas com plano pago."
+        title="Banners e Publicidade"
+        subtitle="Gere banners do carrossel, campanhas gratuitas da plataforma, anunciantes externos e lojas pagas."
         search={search}
         onSearchChange={(v) => {
           setSearch(v);
           setPage(1);
         }}
-        searchPlaceholder="Pesquisar por título, anunciante ou loja..."
+        searchPlaceholder="Pesquisar por título, descrição, anunciante ou loja..."
         filterValue={posFilter}
         onFilterChange={(v) => {
           setPosFilter(v);
@@ -1663,29 +1990,70 @@ export const AdsSection: React.FC<{
         }}
         filterOptions={[
           { value: "todos", label: "Todas as posições" },
+          { value: "topo", label: "Carrossel Início (Topo)" },
           { value: "faixa", label: "Faixa inferior" },
-          { value: "topo", label: "Topo" },
           { value: "categoria", label: "Categoria" },
           { value: "pesquisa", label: "Pesquisa" },
           { value: "ecra_inteiro", label: "Ecrã inteiro" },
         ]}
+        secondFilterValue={statusFilter}
+        onSecondFilterChange={(v) => {
+          setStatusFilter(v);
+          setPage(1);
+        }}
+        secondFilterOptions={[
+          { value: "todos", label: "Todos os estados" },
+          { value: "activos", label: "Activos" },
+          { value: "agendados", label: "Agendados" },
+          { value: "rascunhos", label: "Rascunhos" },
+          { value: "pendentes", label: "Pendentes" },
+          { value: "expirados", label: "Expirados" },
+          { value: "suspensos", label: "Suspensos" },
+          { value: "pagos", label: "Pagos (Patrocinado)" },
+          { value: "gratuitos", label: "Gratuitos" },
+        ]}
         onExportCsv={() =>
           downloadCsv(
-            "anuncios-mercado-uige",
-            ["Título", "Tipo Anunciante", "Anunciante / Loja", "Destino", "Mídia", "Posição", "Visualizações", "Cliques", "Estado", "Início", "Fim"],
-            filtered.map((a) => [
-              a.title,
-              formatAdvertiserLabel(a),
-              a.advertiserName || a.storeName || "Mercado Uíge",
-              `${a.destinationType || "loja"}: ${a.destinationValue || a.storeId || a.productId || ""}`,
-              a.mediaType === "video" ? "Vídeo" : "Imagem",
-              formatPositionLabel(a.position),
-              a.views,
-              a.clicks,
-              a.active ? "Activo" : a.status,
-              fmtDate(a.startDate),
-              fmtDate(a.endDate),
-            ])
+            "banners-mercado-uige",
+            [
+              "Título",
+              "Categoria",
+              "Tipo",
+              "Ordem",
+              "Prioridade",
+              "Anunciante / Loja",
+              "Destino",
+              "Posição",
+              "Duração (s)",
+              "Visualizações",
+              "Cliques",
+              "CTR %",
+              "Estado",
+              "Motivo",
+              "Início (Luanda)",
+              "Fim (Luanda)",
+            ],
+            filtered.map((a) => {
+              const lc = resolveAdLifecycleState(a, stores);
+              return [
+                a.title,
+                formatBannerCategoryLabel(a.bannerCategory),
+                isBannerPaid(a) ? "Pago" : "Gratuito",
+                a.order ?? 0,
+                a.priority ?? 0,
+                a.advertiserName || a.storeName || "Mercado Uíge",
+                `${a.destinationType || "loja"}: ${a.destinationValue || a.linkUrl || a.storeId || a.productId || ""}`,
+                formatPositionLabel(a.position),
+                a.durationSec ?? `${defaultBannerDurationSec} (global)`,
+                a.views,
+                a.clicks,
+                `${computeAdCtrPercent(a)}%`,
+                lc.label,
+                lc.reason,
+                a.startDate ? formatLuandaDateTimeShort(a.startDate) : "Sem datas",
+                a.endDate ? formatLuandaDateTimeShort(a.endDate) : "Sem datas",
+              ];
+            })
           )
         }
         totalFiltered={filtered.length}
@@ -1693,7 +2061,7 @@ export const AdsSection: React.FC<{
 
       {ads.length === 0 ? (
         <div className="p-8 text-center rounded-2xl bg-[#172338] border border-[#26354B] space-y-3">
-          <p className="font-bold text-sm text-white">Ainda não há anúncios criados.</p>
+          <p className="font-bold text-sm text-white">Ainda não há banners ou anúncios criados.</p>
           <p className="text-xs text-[#A6B2C5] max-w-md mx-auto">
             Cria campanhas da própria plataforma Mercado Uíge, de anunciantes externos ou de lojas parceiras com plano pago activo.
           </p>
@@ -1707,7 +2075,7 @@ export const AdsSection: React.FC<{
         </div>
       ) : paged.length === 0 ? (
         <div className="p-8 text-center rounded-2xl bg-[#172338] border border-[#26354B] text-xs text-[#A6B2C5]">
-          Nenhum anúncio encontrado com os filtros aplicados.
+          Nenhum banner encontrado com os filtros aplicados.
         </div>
       ) : (
         <>
@@ -1716,141 +2084,282 @@ export const AdsSection: React.FC<{
               <table className="w-full text-left text-xs">
                 <thead className="bg-[#111D30] text-[#A6B2C5] uppercase font-bold">
                   <tr>
-                    <th className="p-3.5">Campanha / Anunciante</th>
-                    <th className="p-3.5">Mídia / Posição</th>
-                    <th className="p-3.5">Métricas</th>
-                    <th className="p-3.5">Datas</th>
-                    <th className="p-3.5">Estado</th>
+                    <th className="p-3.5">Ordem</th>
+                    <th className="p-3.5">Banner / Anunciante</th>
+                    <th className="p-3.5">Tipo / Posição</th>
+                    <th className="p-3.5">Desempenho (CTR)</th>
+                    <th className="p-3.5">Datas (Luanda)</th>
+                    <th className="p-3.5">Estado e Motivo</th>
                     <th className="p-3.5 text-right">Acções</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#26354B]">
-                  {paged.map((ad) => (
-                    <tr key={ad.id} className="hover:bg-[#111D30]/40">
-                      <td className="p-3.5">
-                        <span className="font-bold text-white block">{ad.title}</span>
-                        <span className="text-[#A6B2C5] inline-flex items-center gap-1.5">
-                          <span className="px-1.5 py-0.5 rounded bg-[#246BFD]/15 text-blue-200 text-[10px] font-bold">
-                            {formatAdvertiserLabel(ad)}
+                  {paged.map((ad) => {
+                    const ctr = computeAdCtrPercent(ad);
+                    const paid = isBannerPaid(ad);
+                    const suspended = Boolean(ad.isSuspended) || ad.status === "suspenso";
+                    const lifecycle = resolveAdLifecycleState(ad, stores);
+                    const badgeColor =
+                      lifecycle.key === "suspenso" || lifecycle.key === "rejeitado"
+                        ? "bg-red-500/20 text-red-400"
+                        : lifecycle.key === "activo"
+                        ? "bg-emerald-500/20 text-emerald-400"
+                        : lifecycle.key === "agendado"
+                        ? "bg-[#246BFD]/25 text-blue-200"
+                        : lifecycle.key === "rascunho" || lifecycle.key === "expirado"
+                        ? "bg-slate-600/35 text-slate-300"
+                        : "bg-amber-500/20 text-amber-300";
+                    const scheduleText =
+                      ad.startDate || ad.endDate
+                        ? `${ad.startDate ? formatLuandaDateTimeShort(ad.startDate) : "Imediato"} → ${
+                            ad.endDate ? formatLuandaDateTimeShort(ad.endDate) : "Sem fim"
+                          }`
+                        : "Sem datas (contínuo)";
+                    return (
+                      <tr key={ad.id} className="hover:bg-[#111D30]/40">
+                        <td className="p-3.5 whitespace-nowrap">
+                          <div className="flex items-center gap-1">
+                            <span className="font-black text-white tabular-nums w-6 text-center">
+                              #{ad.order ?? 0}
+                            </span>
+                            {onReorderAd && (
+                              <div className="flex flex-col gap-0.5">
+                                <button
+                                  type="button"
+                                  aria-label={`Subir ordem de ${ad.title}`}
+                                  onClick={() => onReorderAd(ad, -1)}
+                                  className="p-0.5 rounded bg-[#111D30] border border-[#26354B] text-[#A6B2C5] hover:text-white cursor-pointer"
+                                >
+                                  <ArrowUp size={10} />
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label={`Descer ordem de ${ad.title}`}
+                                  onClick={() => onReorderAd(ad, 1)}
+                                  className="p-0.5 rounded bg-[#111D30] border border-[#26354B] text-[#A6B2C5] hover:text-white cursor-pointer"
+                                >
+                                  <ArrowDown size={10} />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                        <td className="p-3.5">
+                          <div className="flex items-center gap-2.5">
+                            {ad.imageUrl && (
+                              <img
+                                src={ad.imageUrl}
+                                alt={ad.title}
+                                className="w-16 h-7 rounded object-cover border border-[#26354B] shrink-0"
+                              />
+                            )}
+                            <div className="min-w-0">
+                              <span className="font-bold text-white block truncate max-w-[200px]">{ad.title}</span>
+                              <span className="text-[#A6B2C5] inline-flex items-center gap-1.5">
+                                <span className="px-1.5 py-0.5 rounded bg-[#246BFD]/15 text-blue-200 text-[10px] font-bold">
+                                  {formatAdvertiserLabel(ad)}
+                                </span>
+                                <span className="truncate max-w-[140px]">
+                                  {ad.advertiserName || ad.storeName || "Mercado Uíge"}
+                                </span>
+                              </span>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="p-3.5">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[10px] font-black ${
+                                  paid
+                                    ? "bg-[#246BFD]/20 text-blue-200"
+                                    : "bg-[#B7F34A]/20 text-[#B7F34A]"
+                                }`}
+                              >
+                                {paid ? "Pago" : "Gratuito"}
+                              </span>
+                              <span className="px-2 py-0.5 rounded bg-[#111D30] border border-[#26354B] text-[10px] font-bold text-slate-200 inline-flex items-center gap-1">
+                                {ad.mediaType === "video" ? <Film size={11} className="text-[#B7F34A]" /> : <ImageIcon size={11} className="text-[#246BFD]" />}
+                                {ad.durationSec ? `${ad.durationSec}s` : `${defaultBannerDurationSec}s`}
+                              </span>
+                            </div>
+                            <span className="block font-black text-[#246BFD] text-[11px]">
+                              {formatPositionLabel(ad.position)} · P{ad.priority ?? 0}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="p-3.5 text-[#A6B2C5] tabular-nums whitespace-nowrap">
+                          <span className="inline-flex items-center gap-1 mr-2.5">
+                            <Eye size={13} /> {ad.views}
                           </span>
-                          <span>{ad.advertiserName || ad.storeName || "Mercado Uíge"}</span>
-                        </span>
-                      </td>
-                      <td className="p-3.5">
-                        <div className="flex items-center gap-1.5">
-                          <span className="px-2 py-0.5 rounded bg-[#111D30] border border-[#26354B] text-[10px] font-bold text-slate-200 inline-flex items-center gap-1">
-                            {ad.mediaType === "video" ? <Film size={11} className="text-[#B7F34A]" /> : <ImageIcon size={11} className="text-[#246BFD]" />}
-                            {ad.mediaType === "video" ? "Vídeo" : "Imagem"}
+                          <span className="inline-flex items-center gap-1 mr-2.5">
+                            <MousePointerClick size={13} /> {ad.clicks}
                           </span>
-                          <span className="font-black text-[#246BFD]">{formatPositionLabel(ad.position)}</span>
-                        </div>
-                      </td>
-                      <td className="p-3.5 text-[#A6B2C5] tabular-nums">
-                        <span className="inline-flex items-center gap-1 mr-3">
-                          <Eye size={13} /> {ad.views}
-                        </span>
-                        <span className="inline-flex items-center gap-1">
-                          <MousePointerClick size={13} /> {ad.clicks}
-                        </span>
-                      </td>
-                      <td className="p-3.5 text-[#A6B2C5] whitespace-nowrap">
-                        {fmtDate(ad.startDate)} → {fmtDate(ad.endDate)}
-                      </td>
-                      <td className="p-3.5 whitespace-nowrap">
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-black capitalize ${
-                            ad.active && ad.status === "aprovado"
-                              ? "bg-emerald-500/20 text-emerald-400"
-                              : "bg-amber-500/20 text-amber-300"
-                          }`}
-                        >
-                          {ad.active && ad.status === "aprovado" ? "Activo" : ad.status}
-                        </span>
-                      </td>
-                      <td className="p-3.5 text-right whitespace-nowrap">
-                        <div className="inline-flex items-center gap-1.5">
-                          {onUpdateAd && (
+                          <span className="font-black text-[#B7F34A]">{ctr}%</span>
+                        </td>
+                        <td className="p-3.5 text-[#A6B2C5] whitespace-nowrap">{scheduleText}</td>
+                        <td className="p-3.5">
+                          <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-black ${badgeColor}`}>
+                            {lifecycle.label}
+                          </span>
+                          <span className="block text-[11px] text-[#A6B2C5] leading-snug mt-1 max-w-[230px]">
+                            {lifecycle.reason}
+                          </span>
+                        </td>
+                        <td className="p-3.5 text-right whitespace-nowrap">
+                          <div className="inline-flex items-center gap-1">
+                            {onUpdateAd && (
+                              <button
+                                type="button"
+                                onClick={() => handleStartEdit(ad)}
+                                className="px-2 py-1 rounded-lg bg-[#111D30] border border-[#26354B] text-white font-bold inline-flex items-center gap-1 cursor-pointer"
+                              >
+                                <Pencil size={11} /> Editar
+                              </button>
+                            )}
+                            {onReviewAd && ad.status === "pendente" && (
+                              <>
+                                <button
+                                  type="button"
+                                  title="Aprovar banner"
+                                  onClick={() => onReviewAd(ad, "aprovado")}
+                                  className="px-2 py-1 rounded-lg bg-emerald-500 text-slate-950 font-black inline-flex items-center gap-1 cursor-pointer"
+                                >
+                                  <Check size={11} /> Aprovar
+                                </button>
+                                <button
+                                  type="button"
+                                  title="Rejeitar banner"
+                                  onClick={() => onReviewAd(ad, "rejeitado")}
+                                  className="px-2 py-1 rounded-lg bg-red-500/15 text-red-400 font-bold inline-flex items-center gap-1 cursor-pointer"
+                                >
+                                  <X size={11} /> Rejeitar
+                                </button>
+                              </>
+                            )}
                             <button
                               type="button"
-                              onClick={() => handleStartEdit(ad)}
-                              className="px-2.5 py-1 rounded-lg bg-[#111D30] border border-[#26354B] text-white font-bold inline-flex items-center gap-1 cursor-pointer"
+                              onClick={() => onToggleAd(ad, !ad.active)}
+                              disabled={suspended}
+                              className={`px-2 py-1 rounded-lg font-bold cursor-pointer disabled:opacity-40 ${
+                                ad.active
+                                  ? "bg-amber-500/15 text-amber-300"
+                                  : "bg-emerald-500 text-slate-950 font-black"
+                              }`}
                             >
-                              <Pencil size={11} /> Editar
+                              {ad.active ? "Desactivar" : "Activar"}
                             </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => onToggleAd(ad, !ad.active)}
-                            className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer ${
-                              ad.active
-                                ? "bg-amber-500/15 text-amber-300"
-                                : "bg-emerald-500 text-slate-950 font-black"
-                            }`}
-                          >
-                            {ad.active ? "Pausar" : "Activar"}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onDeleteAd(ad)}
-                            className="px-2.5 py-1 rounded-lg bg-red-500/15 text-red-400 font-bold cursor-pointer"
-                          >
-                            Eliminar
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                            {onSuspendAd && (
+                              <button
+                                type="button"
+                                onClick={() => onSuspendAd(ad, !suspended)}
+                                className={`px-2 py-1 rounded-lg font-bold inline-flex items-center gap-1 cursor-pointer ${
+                                  suspended
+                                    ? "bg-[#246BFD]/20 text-blue-200"
+                                    : "bg-slate-700/60 text-slate-200"
+                                }`}
+                              >
+                                <Ban size={11} /> {suspended ? "Reactivar" : "Suspender"}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => onDeleteAd(ad)}
+                              className="px-2 py-1 rounded-lg bg-red-500/15 text-red-400 font-bold cursor-pointer"
+                            >
+                              Eliminar
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           </div>
 
           <div className="md:hidden space-y-3">
-            {paged.map((ad) => (
-              <div key={ad.id} className="p-4 rounded-2xl bg-[#172338] border border-[#26354B] space-y-2 text-xs">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <span className="font-bold text-white block">{ad.title}</span>
-                    <span className="text-[#A6B2C5]">
-                      {formatAdvertiserLabel(ad)} · {ad.advertiserName || ad.storeName || "Mercado Uíge"} ·{" "}
-                      {ad.mediaType === "video" ? "Vídeo" : "Imagem"} · {formatPositionLabel(ad.position)}
-                    </span>
+            {paged.map((ad) => {
+              const ctr = computeAdCtrPercent(ad);
+              const suspended = Boolean(ad.isSuspended) || ad.status === "suspenso";
+              const lifecycle = resolveAdLifecycleState(ad, stores);
+              const scheduleText =
+                ad.startDate || ad.endDate
+                  ? `${ad.startDate ? formatLuandaDateTimeShort(ad.startDate) : "Imediato"} → ${
+                      ad.endDate ? formatLuandaDateTimeShort(ad.endDate) : "Sem fim"
+                    }`
+                  : "Sem datas (contínuo)";
+              return (
+                <div key={ad.id} className="p-4 rounded-2xl bg-[#172338] border border-[#26354B] space-y-2 text-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <span className="font-bold text-white block">{ad.title}</span>
+                      <span className="text-[#A6B2C5]">
+                        #{ad.order ?? 0} · {isBannerPaid(ad) ? "Pago" : "Gratuito"} ·{" "}
+                        {ad.advertiserName || ad.storeName || "Mercado Uíge"} · {formatPositionLabel(ad.position)}
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-[#A6B2C5] shrink-0">{scheduleText}</span>
                   </div>
-                  <span className="text-[11px] text-[#A6B2C5] shrink-0">
-                    {fmtDate(ad.startDate)} → {fmtDate(ad.endDate)}
-                  </span>
-                </div>
-                <div className="flex gap-4 text-[#A6B2C5] tabular-nums">
-                  <span>{ad.views} vistas</span>
-                  <span>{ad.clicks} cliques</span>
-                </div>
-                <div className="pt-2 border-t border-[#26354B] flex gap-2">
-                  {onUpdateAd && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="px-2 py-0.5 rounded bg-[#111D30] border border-[#26354B] text-[10px] font-black text-white">
+                      {lifecycle.label}
+                    </span>
+                    <span className="text-[11px] text-[#A6B2C5]">{lifecycle.reason}</span>
+                  </div>
+                  <div className="flex gap-4 text-[#A6B2C5] tabular-nums">
+                    <span>{ad.views} vistas</span>
+                    <span>{ad.clicks} cliques</span>
+                    <span className="font-black text-[#B7F34A]">{ctr}% CTR</span>
+                  </div>
+                  <div className="pt-2 border-t border-[#26354B] flex flex-wrap gap-2">
+                    {onUpdateAd && (
+                      <button
+                        type="button"
+                        onClick={() => handleStartEdit(ad)}
+                        className="px-3 py-1.5 rounded-lg bg-[#111D30] border border-[#26354B] text-white font-bold cursor-pointer"
+                      >
+                        Editar
+                      </button>
+                    )}
+                    {onReviewAd && ad.status === "pendente" && (
+                      <button
+                        type="button"
+                        onClick={() => onReviewAd(ad, "aprovado")}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-500 text-slate-950 font-black cursor-pointer"
+                      >
+                        Aprovar
+                      </button>
+                    )}
                     <button
                       type="button"
-                      onClick={() => handleStartEdit(ad)}
-                      className="px-3 py-1.5 rounded-lg bg-[#111D30] border border-[#26354B] text-white font-bold cursor-pointer"
+                      onClick={() => onToggleAd(ad, !ad.active)}
+                      disabled={suspended}
+                      className="flex-1 py-1.5 rounded-lg bg-[#246BFD] text-white font-bold cursor-pointer disabled:opacity-40"
                     >
-                      Editar
+                      {ad.active ? "Desactivar" : "Activar"}
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => onToggleAd(ad, !ad.active)}
-                    className="flex-1 py-1.5 rounded-lg bg-[#246BFD] text-white font-bold cursor-pointer"
-                  >
-                    {ad.active ? "Pausar" : "Activar"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onDeleteAd(ad)}
-                    className="px-3 py-1.5 rounded-lg bg-red-500/15 text-red-400 font-bold cursor-pointer"
-                  >
-                    Eliminar
-                  </button>
+                    {onSuspendAd && (
+                      <button
+                        type="button"
+                        onClick={() => onSuspendAd(ad, !suspended)}
+                        className="px-3 py-1.5 rounded-lg bg-slate-700/60 text-white font-bold cursor-pointer"
+                      >
+                        {suspended ? "Reactivar" : "Suspender"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => onDeleteAd(ad)}
+                      className="px-3 py-1.5 rounded-lg bg-red-500/15 text-red-400 font-bold cursor-pointer"
+                    >
+                      Eliminar
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </>
       )}

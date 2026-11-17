@@ -23,9 +23,11 @@ import { SellerStudioView } from "../components/SellerStudioView";
 import { PublishProductModal } from "../components/PublishProductModal";
 import { SponsoredMediaView } from "../components/SponsoredMediaView";
 import { FullscreenAdOverlay } from "../components/FullscreenAdOverlay";
+import { HomeBannerCarousel } from "../components/HomeBannerCarousel";
 import { MobileApp } from "../App";
 import { AdminApp } from "../../../admin/src/App";
 import { AdsSection, PaymentsSection } from "../../../admin/src/components/OperationalSections";
+import { ConfigSection } from "../../../admin/src/components/ConfigSection";
 
 const SAMPLE_PRODUCT: Product = {
   id: "prod_1",
@@ -567,5 +569,212 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
     expect(paymentsHtml).toContain("Farmácia Central Uíge");
     expect(paymentsHtml).toContain("Anúncio Externo");
     expect(paymentsHtml).toContain("Ver Comprovativo");
+  });
+
+  it("renderiza HomeBannerCarousel (pago vs gratuito), indicadores do AdsSection e ConfigSection do carrossel (FASE A)", () => {
+    const emptyCarouselHtml = renderToStaticMarkup(
+      <HomeBannerCarousel
+        banners={[]}
+        autoplay={true}
+        defaultDurationSec={8}
+        onOpenBanner={() => {}}
+        onExploreCatalog={() => {}}
+        onOpenStores={() => {}}
+        onOpenUsed={() => {}}
+      />
+    );
+    assertCleanUiMarkup(emptyCarouselHtml);
+    expect(emptyCarouselHtml).toContain("Comércio Local do Uíge");
+
+    const paidBanner = {
+      id: "b_paid",
+      advertiserType: "externo" as const,
+      advertiserName: "Supermercado Uíge",
+      bannerCategory: "patrocinado" as const,
+      isPaid: true,
+      priority: 20,
+      order: 1,
+      durationSec: 10,
+      sellerId: "admin_1",
+      title: "Semana dos Frescos",
+      description: "Descontos em frutas e legumes do Negage.",
+      ctaText: "Aproveitar Agora",
+      imageUrl: "https://cdn.example.com/banner1.jpg",
+      position: "topo" as const,
+      startDate: "2026-01-01T00:00:00Z",
+      endDate: "2027-01-01T00:00:00Z",
+      views: 150,
+      clicks: 12,
+      active: true,
+      status: "aprovado" as const,
+      createdAt: "2026-01-01T00:00:00Z",
+    };
+
+    const freeBanner = {
+      id: "b_free",
+      advertiserType: "plataforma" as const,
+      advertiserName: "Mercado Uíge",
+      bannerCategory: "publico" as const,
+      isPaid: false,
+      priority: 5,
+      order: 2,
+      durationSec: null,
+      sellerId: "admin_1",
+      title: "Campanha Comércio Seguro",
+      description: "Compra sempre com entrega confirmada no Uíge.",
+      ctaText: "Saber Mais",
+      imageUrl: "https://cdn.example.com/banner2.jpg",
+      position: "topo" as const,
+      startDate: "2026-01-01T00:00:00Z",
+      endDate: "2027-01-01T00:00:00Z",
+      views: 80,
+      clicks: 4,
+      active: true,
+      status: "aprovado" as const,
+      createdAt: "2026-01-01T00:00:00Z",
+    };
+
+    const paidFirstHtml = renderToStaticMarkup(
+      <HomeBannerCarousel
+        banners={[freeBanner, paidBanner]}
+        autoplay={true}
+        defaultDurationSec={8}
+        activeIndex={0}
+        onOpenBanner={() => {}}
+        onExploreCatalog={() => {}}
+        onOpenStores={() => {}}
+        onOpenUsed={() => {}}
+      />
+    );
+    assertCleanUiMarkup(paidFirstHtml);
+    expect(paidFirstHtml).toContain("Patrocinado");
+    expect(paidFirstHtml).toContain("Semana dos Frescos");
+    expect(paidFirstHtml).toContain("Aproveitar Agora");
+    expect(paidFirstHtml).toContain("Próximo banner");
+
+    const freeSecondHtml = renderToStaticMarkup(
+      <HomeBannerCarousel
+        banners={[freeBanner, paidBanner]}
+        autoplay={false}
+        defaultDurationSec={8}
+        activeIndex={1}
+        onOpenBanner={() => {}}
+        onExploreCatalog={() => {}}
+        onOpenStores={() => {}}
+        onOpenUsed={() => {}}
+      />
+    );
+    assertCleanUiMarkup(freeSecondHtml);
+    expect(freeSecondHtml).not.toContain('data-testid="banner-paid-badge"');
+    expect(freeSecondHtml).toContain("Destaque Uíge");
+    expect(freeSecondHtml).toContain("Campanha Comércio Seguro");
+
+    const adsSectionHtml = renderToStaticMarkup(
+      <AdsSection
+        ads={[paidBanner, freeBanner]}
+        stores={[]}
+        defaultBannerDurationSec={DEFAULT_SYSTEM_CONFIG.bannerDefaultDurationSec}
+        onCreateAd={async () => {}}
+        onUpdateAd={async () => {}}
+        onToggleAd={() => {}}
+        onReviewAd={() => {}}
+        onSuspendAd={() => {}}
+        onReorderAd={() => {}}
+        onDeleteAd={() => {}}
+      />
+    );
+    assertCleanUiMarkup(adsSectionHtml);
+    expect(adsSectionHtml).toContain("Activos");
+    expect(adsSectionHtml).toContain("Pendentes");
+    expect(adsSectionHtml).toContain("Expirados");
+    expect(adsSectionHtml).toContain("Pagos");
+    expect(adsSectionHtml).toContain("Gratuitos");
+    expect(adsSectionHtml).toContain("Taxa de cliques");
+    expect(adsSectionHtml).toContain("Suspender");
+
+    const configHtml = renderToStaticMarkup(
+      <ConfigSection
+        currentUser={{
+          id: "adm_1",
+          name: "Admin Uíge",
+          email: "admin@uige.ao",
+          role: "super_admin",
+          walletBalance: 0,
+          createdAt: "2026-01-01T00:00:00Z",
+        }}
+        systemConfig={DEFAULT_SYSTEM_CONFIG}
+        users={[]}
+        onRequestSaveConfig={() => {}}
+        onRequestChangeRole={() => {}}
+      />
+    );
+    assertCleanUiMarkup(configHtml);
+    expect(configHtml).toContain("Carrossel de Banners (Definição Global)");
+    expect(configHtml).toContain("Reprodução automática ligada");
+    expect(configHtml).toContain("20s");
+  });
+
+  it("renderiza AdsSection com fuso Africa/Luanda (UTC+1), Publicar agora, Rascunho, Agendado e motivo visível (FASE 1)", () => {
+    const futureIso = new Date(Date.now() + 3 * 86400_000).toISOString();
+    const futureEndIso = new Date(Date.now() + 10 * 86400_000).toISOString();
+
+    const scheduledBanner = {
+      id: "ad_sched",
+      advertiserType: "plataforma" as const,
+      advertiserName: "Mercado Uíge",
+      bannerCategory: "publico" as const,
+      isPaid: false,
+      sellerId: "adm_1",
+      title: "Campanha Agendada Luanda",
+      imageUrl: "",
+      position: "topo" as const,
+      startDate: futureIso,
+      endDate: futureEndIso,
+      views: 0,
+      clicks: 0,
+      active: true,
+      status: "aprovado" as const,
+      createdAt: "2026-01-01T00:00:00Z",
+    };
+
+    const draftBanner = {
+      id: "ad_draft",
+      advertiserType: "plataforma" as const,
+      advertiserName: "Mercado Uíge",
+      bannerCategory: "publico" as const,
+      isPaid: false,
+      sellerId: "adm_1",
+      title: "Banner em Rascunho",
+      imageUrl: "",
+      position: "topo" as const,
+      startDate: null,
+      endDate: null,
+      views: 0,
+      clicks: 0,
+      active: false,
+      status: "rascunho" as const,
+      statusReason: "Falta aprovar arte gráfica",
+      createdAt: "2026-01-01T00:00:00Z",
+    };
+
+    const html = renderToStaticMarkup(
+      <AdsSection
+        ads={[scheduledBanner, draftBanner]}
+        stores={[]}
+        defaultBannerDurationSec={DEFAULT_SYSTEM_CONFIG.bannerDefaultDurationSec}
+        onCreateAd={async () => {}}
+        onUpdateAd={async () => {}}
+        onToggleAd={() => {}}
+        onDeleteAd={() => {}}
+      />
+    );
+    assertCleanUiMarkup(html);
+    expect(html).toContain("Africa/Luanda");
+    expect(html).toContain("Publicar agora");
+    expect(html).toContain("Guardar Rascunho");
+    expect(html).toContain("Agendado para");
+    expect(html).toContain("Rascunho");
+    expect(html).toContain("Falta aprovar arte gráfica");
+    expect(html).toContain("Sem datas (contínuo)");
   });
 });

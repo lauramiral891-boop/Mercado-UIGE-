@@ -64,6 +64,9 @@ import {
   supabase,
   isSupabaseConfigured,
   saveCurrentUser,
+  ServerErrorDetail,
+  extractServerErrorDetail,
+  resolveAdLifecycleState,
   translateErrorMessage,
   formatUserRole,
   isAnyAdminRole,
@@ -128,6 +131,7 @@ export const AdminApp: React.FC = () => {
   const [resendTimer, setResendTimer] = useState(0);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState("");
+  const [loginErrorCode, setLoginErrorCode] = useState<string | null>(null);
 
   // Dados operacionais
   const [users, setUsers] = useState<User[]>([]);
@@ -157,16 +161,21 @@ export const AdminApp: React.FC = () => {
 
   // Lightbox & Toast & Confirmação
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; code?: string | null; tone?: "ok" | "err" } | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [confirmLoading, setConfirmLoading] = useState(false);
+  const [confirmError, setConfirmError] = useState<ServerErrorDetail | null>(null);
 
-  const showToast = useCallback((msg: string) => {
-    setToast(msg);
-    setTimeout(() => {
-      setToast((prev) => (prev === msg ? null : prev));
-    }, 3800);
-  }, []);
+  const showToast = useCallback(
+    (msg: string, opts?: { code?: string | null; tone?: "ok" | "err" }) => {
+      const payload = { message: msg, code: opts?.code ?? null, tone: opts?.tone ?? "ok" };
+      setToast(payload);
+      setTimeout(() => {
+        setToast((prev) => (prev?.message === msg ? null : prev));
+      }, opts?.tone === "err" ? 5500 : 3800);
+    },
+    []
+  );
 
   const recordOperationTiming = useCallback((operation: string, durationMs: number, ok: boolean) => {
     const entry: OperationTiming = {
@@ -316,12 +325,12 @@ export const AdminApp: React.FC = () => {
     } catch (err: unknown) {
       const elapsed = performance.now() - start;
       recordOperationTiming("Carregar Painel", elapsed, false);
-      const msg = translateErrorMessage(err, "Não foi possível carregar os dados do painel.");
-      showToast(msg);
+      const detail = extractServerErrorDetail(err, "Erro ao carregar os dados do painel no servidor.");
+      showToast(detail.message, { code: detail.code, tone: "err" });
       appErrorRepo
         .report({
           screen: activeTabRef.current,
-          message: sanitizeTelemetryText(msg, 160),
+          message: sanitizeTelemetryText(detail.code ? `${detail.message} (${detail.code})` : detail.message, 160),
           source: "loadData",
           durationMs: Math.round(elapsed),
         })
@@ -349,6 +358,7 @@ export const AdminApp: React.FC = () => {
   const handleSendOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError("");
+    setLoginErrorCode(null);
     const cleanEmail = loginEmail.trim().toLowerCase();
 
     if (!cleanEmail.includes("@")) {
@@ -371,13 +381,14 @@ export const AdminApp: React.FC = () => {
     try {
       const { error } = await sendEmailOtp(cleanEmail);
       if (error) {
-        const msg = translateErrorMessage(error, "Não foi possível enviar o código de verificação.");
-        setLoginError(msg);
+        const detail = extractServerErrorDetail(error, "Erro ao enviar o código de verificação por e-mail.");
+        setLoginError(detail.message);
+        setLoginErrorCode(detail.code);
         await systemEventRepo.record({
           type: "ENVIO_OTP_ADMIN_FALHADO",
           severity: "aviso",
           userEmail: cleanEmail,
-          detail: msg,
+          detail: detail.message,
         });
       } else {
         setOtpCode("");
@@ -385,7 +396,9 @@ export const AdminApp: React.FC = () => {
         setResendTimer(60);
       }
     } catch (err: unknown) {
-      setLoginError(translateErrorMessage(err, "Sem ligação. Verifica a internet e tenta novamente."));
+      const detail = extractServerErrorDetail(err, "Sem ligação. Verifica a internet e tenta novamente.");
+      setLoginError(detail.message);
+      setLoginErrorCode(detail.code);
     } finally {
       setLoginLoading(false);
     }
@@ -394,6 +407,7 @@ export const AdminApp: React.FC = () => {
   const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError("");
+    setLoginErrorCode(null);
     const cleanLoginEmail = loginEmail.trim().toLowerCase();
 
     if (otpCode.length < 6) {
@@ -405,13 +419,14 @@ export const AdminApp: React.FC = () => {
     try {
       const { error } = await verifyEmailOtp(cleanLoginEmail, otpCode);
       if (error) {
-        const msg = translateErrorMessage(error, "Código inválido ou expirado.");
-        setLoginError(msg);
+        const detail = extractServerErrorDetail(error, "Código inválido ou expirado.");
+        setLoginError(detail.message);
+        setLoginErrorCode(detail.code);
         await systemEventRepo.record({
           type: "LOGIN_ADMIN_FALHADO",
           severity: "alta",
           userEmail: cleanLoginEmail,
-          detail: `Falha ao validar código OTP no painel: ${msg}`,
+          detail: `Falha ao validar código OTP no painel: ${detail.message}`,
         });
         setLoginLoading(false);
         return;
@@ -445,7 +460,9 @@ export const AdminApp: React.FC = () => {
         role: matched.role,
       });
     } catch (err: unknown) {
-      setLoginError(translateErrorMessage(err, "Não foi possível validar o acesso."));
+      const detail = extractServerErrorDetail(err, "Erro ao validar o acesso no servidor.");
+      setLoginError(detail.message);
+      setLoginErrorCode(detail.code);
     } finally {
       setLoginLoading(false);
     }
@@ -463,27 +480,31 @@ export const AdminApp: React.FC = () => {
   };
 
   const openConfirm = (cfg: Omit<ConfirmState, "open">) => {
+    setConfirmError(null);
     setConfirmState({ ...cfg, open: true });
   };
 
   const handleRunConfirmedAction = async (reason?: string) => {
     if (!confirmState) return;
     setConfirmLoading(true);
+    setConfirmError(null);
     const start = performance.now();
     try {
       await confirmState.action(reason);
       recordOperationTiming(confirmState.confirmLabel, performance.now() - start, true);
       setConfirmState(null);
+      setConfirmError(null);
       await loadData();
     } catch (err: unknown) {
       const elapsed = performance.now() - start;
       recordOperationTiming(confirmState.confirmLabel, elapsed, false);
-      const msg = translateErrorMessage(err, "Não foi possível concluir a operação.");
-      showToast(msg);
+      const detail = extractServerErrorDetail(err, "Erro ao concluir a operação no servidor.");
+      setConfirmError(detail);
+      showToast(detail.message, { code: detail.code, tone: "err" });
       appErrorRepo
         .report({
           screen: activeTabRef.current,
-          message: sanitizeTelemetryText(msg, 160),
+          message: sanitizeTelemetryText(detail.code ? `${detail.message} (${detail.code})` : detail.message, 160),
           source: "action",
           durationMs: Math.round(elapsed),
         })
@@ -798,18 +819,83 @@ export const AdminApp: React.FC = () => {
   const requestToggleAd = (ad: SponsoredAd, nextActive: boolean) => {
     if (!currentUser) return;
     openConfirm({
-      title: nextActive ? `Activar anúncio "${ad.title}"?` : `Pausar anúncio "${ad.title}"?`,
+      title: nextActive ? `Activar banner "${ad.title}"?` : `Desactivar banner "${ad.title}"?`,
       description: nextActive
-        ? "O anúncio voltará a ser exibido no carrossel patrocinado dentro da validade."
-        : "O anúncio deixará de aparecer aos compradores enquanto estiver pausado.",
-      confirmLabel: nextActive ? "Activar Anúncio" : "Pausar Anúncio",
+        ? "O banner ficará aprovado e activo no ar respeitando as datas em Africa/Luanda."
+        : "O banner passará para pausa (rascunho) e deixará de aparecer aos compradores.",
+      confirmLabel: nextActive ? "Activar Banner" : "Desactivar Banner",
       tone: nextActive ? "primary" : "warning",
       action: async () => {
-        await adRepo.updateStatus(ad.id, nextActive ? "aprovado" : ad.status, nextActive);
-        await auditRepo.log(currentUser.id, "REVIEW_AD", ad.title, { active: nextActive });
-        showToast(nextActive ? "Anúncio activado." : "Anúncio pausado.");
+        const nextStatus = nextActive ? "aprovado" : "rascunho";
+        const nextReason = nextActive ? null : "Desactivado manualmente pelo administrador.";
+        await adRepo.updateStatus(ad.id, nextStatus, nextActive, nextReason);
+        await auditRepo.log(currentUser.id, "REVIEW_AD", ad.title, { active: nextActive, status: nextStatus });
+        showToast(nextActive ? "Banner activado." : "Banner desactivado.");
       },
     });
+  };
+
+  const requestReviewAd = (ad: SponsoredAd, status: "aprovado" | "rejeitado") => {
+    if (!currentUser) return;
+    const approve = status === "aprovado";
+    openConfirm({
+      title: approve ? `Aprovar banner "${ad.title}"?` : `Rejeitar banner "${ad.title}"?`,
+      description: approve
+        ? "O banner ficará aprovado e entrará no ar segundo o período definido (ou imediatamente se sem datas)."
+        : "O banner será rejeitado e ocultado da app mobile com o motivo indicado.",
+      confirmLabel: approve ? "Aprovar Banner" : "Rejeitar Banner",
+      tone: approve ? "primary" : "danger",
+      requireReason: !approve,
+      reasonLabel: "Motivo da rejeição *",
+      reasonPlaceholder: "Ex.: Imagem cortada, link inválido ou fora das regras...",
+      action: async (reason) => {
+        await adRepo.updateStatus(ad.id, status, approve, approve ? null : reason || "Rejeitado pela moderação.");
+        await auditRepo.log(currentUser.id, approve ? "APPROVE_AD" : "REJECT_AD", ad.title, { status, reason });
+        showToast(approve ? "Banner aprovado e activado." : "Banner rejeitado.");
+      },
+    });
+  };
+
+  const requestSuspendAd = (ad: SponsoredAd, suspended: boolean) => {
+    if (!currentUser) return;
+    openConfirm({
+      title: suspended ? `Suspender banner "${ad.title}"?` : `Reactivar banner "${ad.title}"?`,
+      description: suspended
+        ? "O banner será suspenso imediatamente e o motivo ficará visível no painel."
+        : "A suspensão será levantada e o banner voltará ao estado aprovado.",
+      confirmLabel: suspended ? "Suspender Banner" : "Reactivar Banner",
+      tone: suspended ? "danger" : "primary",
+      requireReason: suspended,
+      reasonLabel: "Motivo da suspensão *",
+      reasonPlaceholder: "Ex.: Promoção encerrada ou loja temporariamente indisponível...",
+      action: async (reason) => {
+        await adRepo.updateStatus(
+          ad.id,
+          suspended ? "suspenso" : "aprovado",
+          !suspended,
+          suspended ? reason || "Suspenso pela moderação." : null
+        );
+        await auditRepo.log(currentUser.id, suspended ? "SUSPEND_AD" : "UNSUSPEND_AD", ad.title, {
+          suspended,
+          reason,
+        });
+        showToast(suspended ? "Banner suspenso." : "Banner reactivado.");
+      },
+    });
+  };
+
+  const handleReorderAd = async (ad: SponsoredAd, delta: -1 | 1) => {
+    if (!currentUser) return;
+    const nextOrder = Math.max(0, Number(ad.order ?? 0) + delta);
+    try {
+      await adRepo.update(ad.id, { order: nextOrder });
+      await auditRepo.log(currentUser.id, "REORDER_AD", ad.title, { order: nextOrder });
+      showToast(`Ordem de "${ad.title}" actualizada para #${nextOrder}.`);
+      await loadData();
+    } catch (err: unknown) {
+      const detail = extractServerErrorDetail(err, "Erro ao reordenar banner.");
+      showToast(detail.message, { code: detail.code, tone: "err" });
+    }
   };
 
   const requestDeleteAd = (ad: SponsoredAd) => {
@@ -928,6 +1014,9 @@ export const AdminApp: React.FC = () => {
       throw new Error("Indica o nome do anunciante externo.");
     }
 
+    const desiredStatus = payload.status === "rascunho" ? "rascunho" : "aprovado";
+    const desiredActive = desiredStatus === "aprovado";
+
     const createdAd = await adRepo.create({
       advertiserType: payload.advertiserType,
       advertiserName:
@@ -943,7 +1032,15 @@ export const AdminApp: React.FC = () => {
       destinationType: payload.destinationType,
       destinationValue: payload.destinationValue,
       title: payload.title,
-      subtitle: payload.subtitle,
+      subtitle: payload.description ?? payload.subtitle,
+      description: payload.description ?? payload.subtitle,
+      ctaText: payload.ctaText,
+      linkUrl: payload.linkUrl,
+      order: payload.order,
+      bannerCategory: payload.bannerCategory,
+      priority: payload.priority,
+      durationSec: payload.durationSec,
+      isPaid: payload.isPaid,
       imageUrl: payload.imageUrl || (st ? st.facadeImage || st.logo || "" : ""),
       videoUrl: payload.videoUrl || null,
       mediaType: payload.mediaType,
@@ -952,8 +1049,9 @@ export const AdminApp: React.FC = () => {
       endDate: payload.endDate,
       paymentAmountKz: payload.paymentAmountKz,
       paymentProofUrl: payload.paymentProofUrl,
-      active: true,
-      status: "aprovado",
+      active: desiredActive,
+      status: desiredStatus,
+      statusReason: payload.statusReason || null,
     });
 
     if (
@@ -983,12 +1081,21 @@ export const AdminApp: React.FC = () => {
         title: payload.title,
         mediaType: payload.mediaType,
         position: payload.position,
+        bannerCategory: payload.bannerCategory,
+        isPaid: payload.isPaid,
+        status: desiredStatus,
       }
     );
+
+    const lifecycle = resolveAdLifecycleState(createdAd, stores);
     showToast(
-      payload.advertiserType === "externo" && payload.paymentAmountKz
+      desiredStatus === "rascunho"
+        ? "Rascunho guardado!"
+        : lifecycle.key === "agendado"
+        ? `Banner ${lifecycle.label.toLowerCase()}!`
+        : payload.advertiserType === "externo" && payload.paymentAmountKz
         ? "Anúncio externo publicado e pagamento registado em Pagamentos!"
-        : "Anúncio publicado!"
+        : "Banner publicado!"
     );
     await loadData();
   };
@@ -1000,7 +1107,10 @@ export const AdminApp: React.FC = () => {
       throw new Error("Apenas lojas com plano pago activo podem ter anúncios patrocinados.");
     }
 
-    await adRepo.update(id, {
+    const desiredStatus = payload.status === "rascunho" ? "rascunho" : "aprovado";
+    const desiredActive = desiredStatus === "aprovado";
+
+    const updated = await adRepo.update(id, {
       advertiserType: payload.advertiserType,
       advertiserName:
         payload.advertiserType === "plataforma"
@@ -1014,13 +1124,24 @@ export const AdminApp: React.FC = () => {
       destinationType: payload.destinationType,
       destinationValue: payload.destinationValue,
       title: payload.title,
-      subtitle: payload.subtitle,
+      subtitle: payload.description ?? payload.subtitle,
+      description: payload.description ?? payload.subtitle,
+      ctaText: payload.ctaText,
+      linkUrl: payload.linkUrl,
+      order: payload.order,
+      bannerCategory: payload.bannerCategory,
+      priority: payload.priority,
+      durationSec: payload.durationSec,
+      isPaid: payload.isPaid,
       imageUrl: payload.imageUrl || (st ? st.facadeImage || st.logo || "" : ""),
       videoUrl: payload.mediaType === "video" ? payload.videoUrl || null : null,
       mediaType: payload.mediaType,
       position: payload.position,
       startDate: payload.startDate,
       endDate: payload.endDate,
+      status: desiredStatus,
+      active: desiredActive,
+      statusReason: payload.statusReason || null,
     });
 
     await auditRepo.log(currentUser.id, "UPDATE_AD", payload.title, {
@@ -1028,8 +1149,16 @@ export const AdminApp: React.FC = () => {
       advertiserType: payload.advertiserType,
       destinationType: payload.destinationType,
       position: payload.position,
+      status: desiredStatus,
     });
-    showToast("Anúncio actualizado!");
+    const lifecycle = resolveAdLifecycleState(updated, stores);
+    showToast(
+      desiredStatus === "rascunho"
+        ? "Rascunho actualizado!"
+        : lifecycle.key === "agendado"
+        ? `Banner ${lifecycle.label.toLowerCase()}!`
+        : "Banner actualizado!"
+    );
     await loadData();
   };
 
@@ -1069,7 +1198,8 @@ export const AdminApp: React.FC = () => {
       showToast("Alerta marcado como resolvido.");
       await loadData();
     } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível resolver o alerta."));
+      const detail = extractServerErrorDetail(err, "Erro ao resolver o alerta no servidor.");
+      showToast(detail.message, { code: detail.code, tone: "err" });
     }
   };
 
@@ -1189,9 +1319,16 @@ export const AdminApp: React.FC = () => {
           </div>
 
           {loginError && (
-            <div className="p-3 rounded-2xl bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-bold mb-4 flex items-center gap-2">
-              <AlertCircle size={15} className="shrink-0" />
-              <span>{loginError}</span>
+            <div className="p-3 rounded-2xl bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-bold mb-4 flex items-start gap-2">
+              <AlertCircle size={15} className="shrink-0 mt-0.5" />
+              <div>
+                <span>{loginError}</span>
+                {loginErrorCode && (
+                  <span className="block text-[10px] font-mono opacity-80 mt-0.5">
+                    Código técnico: {loginErrorCode}
+                  </span>
+                )}
+              </div>
             </div>
           )}
 
@@ -1293,7 +1430,7 @@ export const AdminApp: React.FC = () => {
       badge: counters.payments,
       badgeTone: counters.payments > 0 ? "amber" : "blue",
     },
-    { id: "anuncios", label: "Anúncios", icon: Megaphone, badge: counters.ads, badgeTone: "blue" },
+    { id: "anuncios", label: "Banners e Publicidade", icon: Megaphone, badge: counters.ads, badgeTone: "blue" },
     {
       id: "entregas",
       label: "Entregas",
@@ -1518,9 +1655,13 @@ export const AdminApp: React.FC = () => {
               ads={ads}
               stores={stores}
               products={products}
+              defaultBannerDurationSec={systemConfig.bannerDefaultDurationSec}
               onCreateAd={handleCreateAdminAd}
               onUpdateAd={handleUpdateAdminAd}
               onToggleAd={requestToggleAd}
+              onReviewAd={requestReviewAd}
+              onSuspendAd={requestSuspendAd}
+              onReorderAd={handleReorderAd}
               onDeleteAd={requestDeleteAd}
             />
           )}
@@ -1587,7 +1728,13 @@ export const AdminApp: React.FC = () => {
         reasonLabel={confirmState?.reasonLabel}
         reasonPlaceholder={confirmState?.reasonPlaceholder}
         loading={confirmLoading}
-        onCancel={() => !confirmLoading && setConfirmState(null)}
+        serverError={confirmError}
+        onCancel={() => {
+          if (!confirmLoading) {
+            setConfirmError(null);
+            setConfirmState(null);
+          }
+        }}
         onConfirm={handleRunConfirmedAction}
       />
 
@@ -1617,8 +1764,17 @@ export const AdminApp: React.FC = () => {
 
       {/* Toast Flutuante */}
       {toast && (
-        <div className="fixed bottom-5 right-5 z-50 px-4 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black text-xs shadow-2xl anim-pop">
-          {toast}
+        <div
+          className={`fixed bottom-5 right-5 z-50 max-w-sm px-4 py-2.5 rounded-xl font-black text-xs shadow-2xl anim-pop ${
+            toast.tone === "err"
+              ? "bg-red-600 text-white border border-red-300/40"
+              : "bg-[#B7F34A] text-slate-950"
+          }`}
+        >
+          <p>{toast.message}</p>
+          {toast.code && (
+            <p className="text-[10px] font-mono opacity-85 mt-0.5">Código técnico: {toast.code}</p>
+          )}
         </div>
       )}
     </div>

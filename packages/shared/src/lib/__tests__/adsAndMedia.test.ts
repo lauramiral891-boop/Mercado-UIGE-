@@ -9,6 +9,23 @@ import {
   AD_VIDEO_TARGET_BYTES,
   MAX_PRODUCT_VIDEO_BYTES,
   MAX_STORAGE_UPLOAD_BYTES,
+  DEFAULT_BANNER_DURATION_SEC,
+  MIN_BANNER_DURATION_SEC,
+  MAX_BANNER_DURATION_SEC,
+  LUANDA_UTC_OFFSET_MINUTES,
+  getNowLuandaInput,
+  luandaInputToUtcIso,
+  utcIsoToLuandaInput,
+  formatLuandaDateTimeShort,
+  isAdWithinScheduleWindow,
+  resolveAdLifecycleState,
+  extractServerErrorDetail,
+  clampBannerDurationSec,
+  resolveEffectiveBannerDurationSec,
+  isBannerPaid,
+  sortBannersForCarousel,
+  computeAdCtrPercent,
+  computeBannerDashboardStats,
   computeTargetVideoBitrate,
   validateVideoConstraints,
   uploadMediaFile,
@@ -19,6 +36,7 @@ import {
   canShowFullscreenAd,
   OfflineAdRepo,
   OfflinePaymentRepo,
+  OfflineSystemConfigRepo,
   saveStores,
   saveAds,
   saveMerchantPayments,
@@ -304,5 +322,235 @@ describe("Anúncios em imagem ou vídeo, dados móveis e regras de ecrã inteiro
     const uploadRes = await uploadMediaFile(oversizedBlob, "grande.mp4", "anuncios");
     expect(uploadRes.url).toBeNull();
     expect(uploadRes.error?.message).toContain("20 MB");
+  });
+
+  it("aplica duração por banner vs padrão global (3..60s), ordenação por prioridade/ordem, CTR e suspensão (FASE A)", async () => {
+    expect(DEFAULT_BANNER_DURATION_SEC).toBe(8);
+    expect(clampBannerDurationSec(undefined)).toBe(8);
+    expect(clampBannerDurationSec(0)).toBe(8);
+    expect(clampBannerDurationSec(1)).toBe(MIN_BANNER_DURATION_SEC);
+    expect(clampBannerDurationSec(120)).toBe(MAX_BANNER_DURATION_SEC);
+    expect(clampBannerDurationSec(15)).toBe(15);
+
+    expect(
+      resolveEffectiveBannerDurationSec({ durationSec: null }, { bannerDefaultDurationSec: 20 })
+    ).toBe(20);
+    expect(
+      resolveEffectiveBannerDurationSec({ durationSec: 12 }, { bannerDefaultDurationSec: 20 })
+    ).toBe(12);
+
+    const cfgRepo = new OfflineSystemConfigRepo();
+    const updatedCfg = await cfgRepo.update({ bannerDefaultDurationSec: 15, bannerAutoplay: false });
+    expect(updatedCfg.bannerDefaultDurationSec).toBe(15);
+    expect(updatedCfg.bannerAutoplay).toBe(false);
+
+    saveStores([]);
+    saveAds([]);
+    const adRepo = new OfflineAdRepo();
+    const pastStart = new Date(Date.now() - 86400_000).toISOString();
+    const futureEnd = new Date(Date.now() + 7 * 86400_000).toISOString();
+
+    const freeBanner = await adRepo.create({
+      advertiserType: "plataforma",
+      bannerCategory: "publico",
+      isPaid: false,
+      title: "Feira do Uíge Gratuita",
+      description: "Entrada livre no mercado municipal",
+      ctaText: "Saber mais",
+      position: "topo",
+      order: 1,
+      priority: 10,
+      durationSec: null,
+      startDate: pastStart,
+      endDate: futureEnd,
+      active: true,
+      status: "aprovado",
+    });
+
+    const paidBanner = await adRepo.create({
+      advertiserType: "externo",
+      advertiserName: "Unitel Uíge",
+      bannerCategory: "patrocinado",
+      isPaid: true,
+      title: "Internet Rápida no Uíge",
+      ctaText: "Ver pacotes",
+      destinationType: "link",
+      destinationValue: "https://unitel.ao/uige",
+      position: "topo",
+      order: 2,
+      priority: 50,
+      durationSec: 12,
+      startDate: pastStart,
+      endDate: futureEnd,
+      active: true,
+      status: "aprovado",
+    });
+
+    const pendingBanner = await adRepo.create({
+      advertiserType: "externo",
+      advertiserName: "Banco BIC",
+      bannerCategory: "promocional",
+      isPaid: true,
+      title: "Campanha Pendente",
+      destinationType: "link",
+      destinationValue: "https://bancobic.ao",
+      position: "topo",
+      order: 3,
+      priority: 5,
+      startDate: pastStart,
+      endDate: futureEnd,
+      active: false,
+      status: "pendente",
+    });
+
+    expect(isBannerPaid(freeBanner)).toBe(false);
+    expect(isBannerPaid(paidBanner)).toBe(true);
+
+    const ordered = sortBannersForCarousel([freeBanner, paidBanner]);
+    expect(ordered[0].id).toBe(paidBanner.id);
+    expect(ordered[1].id).toBe(freeBanner.id);
+
+    // Simular vistas e cliques
+    const saved = (await adRepo.getAll(true)).map((item) =>
+      item.id === paidBanner.id ? { ...item, views: 200, clicks: 15 } : item
+    );
+    saveAds(saved);
+
+    expect(computeAdCtrPercent({ views: 200, clicks: 15 })).toBe(7.5);
+    const stats = computeBannerDashboardStats(await adRepo.getAll(true));
+    expect(stats.activos).toBe(2);
+    expect(stats.pendentes).toBe(1);
+    expect(stats.pagos).toBe(2);
+    expect(stats.gratuitos).toBe(1);
+    expect(stats.totalViews).toBe(200);
+    expect(stats.totalClicks).toBe(15);
+    expect(stats.ctrPercent).toBe(7.5);
+
+    // Suspender banner retira-o da lista pública
+    await adRepo.updateStatus(paidBanner.id, "suspenso", false);
+    const publicAfterSuspend = await adRepo.getAll(false);
+    expect(publicAfterSuspend.map((a) => a.id)).toEqual([freeBanner.id]);
+
+    // Aprovar pendente
+    await adRepo.updateStatus(pendingBanner.id, "aprovado", true);
+    const publicAfterApprove = await adRepo.getAll(false);
+    expect(publicAfterApprove.map((a) => a.id)).toContain(pendingBanner.id);
+  });
+
+  it("converte datas Africa/Luanda (UTC+1) para UTC, valida agendamentos futuros/sem datas e extrai erros reais do servidor (FASE 1)", async () => {
+    expect(LUANDA_UTC_OFFSET_MINUTES).toBe(60);
+
+    // 14:30 em Africa/Luanda (UTC+1) == 13:30 UTC no mesmo dia, independente do fuso do servidor Node
+    const utcFromLuanda = luandaInputToUtcIso("2026-11-17T14:30");
+    expect(utcFromLuanda).toBe("2026-11-17T13:30:00.000Z");
+    expect(utcIsoToLuandaInput("2026-11-17T13:30:00.000Z")).toBe("2026-11-17T14:30");
+
+    // Passagem de meia-noite UTC -> Luanda (23:30 UTC == 00:30 do dia seguinte em Luanda)
+    expect(utcIsoToLuandaInput("2026-11-17T23:30:00.000Z")).toBe("2026-11-18T00:30");
+    expect(formatLuandaDateTimeShort("2026-11-17T23:30:00.000Z")).toBe("18/11 00:30");
+    expect(getNowLuandaInput(Date.UTC(2026, 10, 17, 13, 30))).toBe("2026-11-17T14:30");
+
+    saveStores([]);
+    saveAds([]);
+    const repo = new OfflineAdRepo();
+    const nowMs = Date.UTC(2026, 10, 17, 12, 0, 0); // 13:00 Luanda
+
+    // 1. Anúncio sem datas entra imediatamente no ar se aprovado e activo
+    const undatedAd = await repo.create({
+      advertiserType: "plataforma",
+      title: "Campanha Sem Datas",
+      destinationType: "link",
+      destinationValue: "https://mercadouige.ao/sempre",
+      position: "topo",
+      startDate: null,
+      endDate: null,
+      active: true,
+      status: "aprovado",
+    });
+    expect(isAdWithinScheduleWindow(undatedAd, nowMs)).toBe(true);
+    expect(isAdEligibleForPublicDisplay(undatedAd, [], nowMs)).toBe(true);
+    const undatedState = resolveAdLifecycleState(undatedAd, [], nowMs);
+    expect(undatedState.key).toBe("activo");
+    expect(undatedState.label).toBe("Activo");
+    expect(undatedState.reason).toContain("sem data de fim");
+
+    // 2. Anúncio agendado para o futuro (15:00 Luanda = 14:00 UTC > 12:00 UTC)
+    const futureUtc = luandaInputToUtcIso("2026-11-17T15:00")!;
+    const endUtc = luandaInputToUtcIso("2026-11-20T18:00")!;
+    const scheduledAd = await repo.create({
+      advertiserType: "plataforma",
+      title: "Black Friday Uíge",
+      destinationType: "link",
+      destinationValue: "https://mercadouige.ao/bf",
+      position: "topo",
+      startDate: futureUtc,
+      endDate: endUtc,
+      active: true,
+      status: "aprovado",
+    });
+    expect(isAdWithinScheduleWindow(scheduledAd, nowMs)).toBe(false);
+    expect(isAdEligibleForPublicDisplay(scheduledAd, [], nowMs)).toBe(false);
+    const scheduledState = resolveAdLifecycleState(scheduledAd, [], nowMs);
+    expect(scheduledState.key).toBe("agendado");
+    expect(scheduledState.label).toBe("Agendado para 17/11 15:00");
+    expect(scheduledState.reason).toContain("17/11 15:00");
+
+    // 3. Rascunho fica inactivo e visível como Rascunho
+    const draftAd = await repo.create({
+      advertiserType: "plataforma",
+      title: "Rascunho de Natal",
+      destinationType: "link",
+      destinationValue: "https://mercadouige.ao/natal",
+      position: "topo",
+      startDate: null,
+      endDate: null,
+      active: false,
+      status: "rascunho",
+      statusReason: "A aguardar fotografia definitiva",
+    });
+    expect(draftAd.active).toBe(false);
+    expect(isAdEligibleForPublicDisplay(draftAd, [], nowMs)).toBe(false);
+    const draftState = resolveAdLifecycleState(draftAd, [], nowMs);
+    expect(draftState.key).toBe("rascunho");
+    expect(draftState.label).toBe("Rascunho");
+    expect(draftState.reason).toBe("A aguardar fotografia definitiva");
+
+    // 4. Lista pública (getAll(false)) devolve apenas o anúncio sem datas; agendado e rascunho ficam ocultos
+    const publicAds = await repo.getAll(false);
+    expect(publicAds.map((a) => a.id)).toEqual([undatedAd.id]);
+
+    // 5. Rejeita fim anterior ao início
+    await expect(
+      repo.create({
+        advertiserType: "plataforma",
+        title: "Data Invertida",
+        startDate: "2026-11-20T12:00:00.000Z",
+        endDate: "2026-11-18T12:00:00.000Z",
+        active: true,
+        status: "aprovado",
+      })
+    ).rejects.toThrow("data de fim");
+
+    // 6. Erros reais do servidor com código técnico (nunca "não é possível")
+    const rlsErr = extractServerErrorDetail({
+      code: "42501",
+      message: 'new row violates row-level security policy for table "anuncios"',
+    });
+    expect(rlsErr.code).toBe("42501");
+    expect(rlsErr.message).toContain("Permissão recusada");
+
+    const missingColErr = extractServerErrorDetail({
+      code: "PGRST204",
+      message: "Could not find the 'motivo_estado' column of 'anuncios' in the schema cache",
+    });
+    expect(missingColErr.code).toBe("PGRST204");
+    expect(missingColErr.message).toContain("Coluna em falta");
+
+    const triggerErr = extractServerErrorDetail({
+      code: "P0001",
+      message: "Apenas lojas com plano pago activo podem ter anúncios patrocinados.",
+    });
+    expect(triggerErr.code).toBe("P0001");
+    expect(triggerErr.message).toBe("Apenas lojas com plano pago activo podem ter anúncios patrocinados.");
   });
 });

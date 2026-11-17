@@ -1117,7 +1117,8 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
                   <div className="min-w-0">
                     <span className="font-bold block truncate">{ad.title} ({ad.position})</span>
                     <span className="text-[11px] opacity-65">
-                      {ad.views} visualizações · {ad.clicks} cliques · Até {fmtDate(ad.endDate)}
+                      {ad.views} visualizações · {ad.clicks} cliques ·{" "}
+                      {ad.endDate ? `Até ${fmtDate(ad.endDate)}` : "Sem data de fim"}
                     </span>
                   </div>
                   <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#246BFD]/15 text-[#246BFD] capitalize shrink-0">

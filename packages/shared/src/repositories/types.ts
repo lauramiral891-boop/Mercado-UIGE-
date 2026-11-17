@@ -127,7 +127,7 @@ export interface IAdRepo {
   getActiveByPosition(position: AdPosition): Promise<SponsoredAd[]>;
   create(ad: Partial<SponsoredAd>): Promise<SponsoredAd>;
   update(id: string, updates: Partial<SponsoredAd>): Promise<SponsoredAd>;
-  updateStatus(id: string, status: SponsoredAd["status"], active: boolean): Promise<void>;
+  updateStatus(id: string, status: SponsoredAd["status"], active: boolean, reason?: string | null): Promise<void>;
   trackView(id: string): Promise<void>;
   trackClick(id: string): Promise<void>;
   delete(id: string): Promise<void>;

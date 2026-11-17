@@ -84,8 +84,12 @@ import {
 import { smartSearch, generateOrderCode, generateDeliveryCode } from "../../lib/utils";
 import { allowTelemetryWrite, sanitizeTelemetryText } from "../../lib/observability";
 import {
+  clampBannerDurationSec,
   isAdEligibleForPublicDisplay,
+  isAdWithinScheduleWindow,
+  isBannerPaid,
   resolveAdAdvertiserType,
+  sortBannersForCarousel,
   storeHasActivePaidPlan,
   validateSafeAdDestination,
 } from "../../lib/adDelivery";
@@ -950,10 +954,12 @@ export class OfflineAdRepo implements IAdRepo {
   async getAll(includeAll = false): Promise<SponsoredAd[]> {
     const now = Date.now();
     const stores = getStoredStores();
-    const list = getStoredAds().map((ad) => {
+    const mappedList = getStoredAds().map((ad) => {
       const store = ad.storeId ? stores.find((s) => s.id === ad.storeId) : undefined;
-      const expired = ad.active && new Date(ad.endDate).getTime() < now;
+      const endMs = ad.endDate ? new Date(ad.endDate).getTime() : NaN;
+      const expired = ad.active && Boolean(ad.endDate) && Number.isFinite(endMs) && endMs < now;
       const advertiserType: AdAdvertiserType = resolveAdAdvertiserType(ad);
+      const isSuspended = Boolean(ad.isSuspended) || ad.status === "suspenso";
       return {
         ...ad,
         advertiserType,
@@ -963,30 +969,47 @@ export class OfflineAdRepo implements IAdRepo {
         destinationType:
           ad.destinationType || (ad.productId ? ("produto" as const) : ("loja" as const)),
         mediaType: ad.mediaType || (ad.videoUrl ? ("video" as const) : ("imagem" as const)),
+        description: ad.description ?? ad.subtitle ?? "",
+        subtitle: ad.subtitle ?? ad.description ?? "",
+        ctaText: ad.ctaText || "Ver oferta",
+        linkUrl: ad.linkUrl || (ad.destinationType === "link" ? ad.destinationValue : undefined),
+        order: Number(ad.order ?? 0),
+        priority: Number(ad.priority ?? 0),
+        bannerCategory:
+          ad.bannerCategory ||
+          (advertiserType === "plataforma" ? "publico" : "patrocinado"),
+        durationSec:
+          ad.durationSec !== undefined && ad.durationSec !== null && Number(ad.durationSec) > 0
+            ? clampBannerDurationSec(ad.durationSec)
+            : null,
+        isPaid: isBannerPaid(ad),
+        isSuspended,
         storePlanType: store?.planType ?? ad.storePlanType,
         storePlanExpiresAt: store?.planExpiresAt ?? ad.storePlanExpiresAt,
         storeIsApproved: store?.isApproved ?? ad.storeIsApproved,
         storeIsSuspended: store?.isSuspended ?? ad.storeIsSuspended,
         storeImage: store?.facadeImage || store?.logo || ad.storeImage,
-        active: expired ? false : ad.active,
-        status: expired ? ("expirado" as const) : ad.status,
+        active: expired || isSuspended ? false : ad.active,
+        status: isSuspended ? ("suspenso" as const) : expired ? ("expirado" as const) : ad.status,
+        statusReason: ad.statusReason ?? null,
       };
     });
-    saveAds(list);
-    if (includeAll) return list;
-    return list.filter(
+    const sorted = sortBannersForCarousel(mappedList);
+    saveAds(sorted);
+    if (includeAll) return sorted;
+    return sorted.filter(
       (a) =>
         a.active &&
+        !a.isSuspended &&
         a.status === "aprovado" &&
-        new Date(a.startDate).getTime() <= now &&
-        new Date(a.endDate).getTime() >= now &&
+        isAdWithinScheduleWindow(a, now) &&
         isAdEligibleForPublicDisplay(a, stores, now)
     );
   }
 
   async getActiveByPosition(position: AdPosition): Promise<SponsoredAd[]> {
     const active = await this.getAll(false);
-    return active.filter((a) => a.position === position);
+    return sortBannersForCarousel(active.filter((a) => a.position === position));
   }
 
   async create(ad: Partial<SponsoredAd>): Promise<SponsoredAd> {
@@ -1007,12 +1030,41 @@ export class OfflineAdRepo implements IAdRepo {
       }
     }
 
-    const { destinationType, destinationValue } = this.normalizeDestination(ad);
+    const { destinationType, destinationValue } = this.normalizeDestination({
+      ...ad,
+      destinationValue: ad.destinationValue || ad.linkUrl,
+    });
 
     const mediaType: "imagem" | "video" =
       ad.mediaType === "video" || (Boolean(ad.videoUrl) && ad.mediaType !== "imagem")
         ? "video"
         : "imagem";
+
+    const bannerCategory =
+      ad.bannerCategory || (advertiserType === "plataforma" ? "publico" : "patrocinado");
+    const isPaid =
+      typeof ad.isPaid === "boolean"
+        ? ad.isPaid
+        : advertiserType !== "plataforma" || bannerCategory === "patrocinado";
+    const isSuspended = Boolean(ad.isSuspended) || ad.status === "suspenso";
+    const description = (ad.description ?? ad.subtitle ?? "").trim();
+
+    const startDate = ad.startDate !== undefined ? ad.startDate : null;
+    const endDate = ad.endDate !== undefined ? ad.endDate : null;
+    if (startDate && endDate && new Date(endDate).getTime() < new Date(startDate).getTime()) {
+      throw new Error("A data de fim do anúncio deve ser igual ou posterior à data de início.");
+    }
+
+    const finalStatus: SponsoredAd["status"] = isSuspended
+      ? "suspenso"
+      : ad.status || "pendente";
+    const finalActive =
+      isSuspended ||
+      finalStatus === "rascunho" ||
+      finalStatus === "rejeitado" ||
+      finalStatus === "expirado"
+        ? false
+        : Boolean(ad.active);
 
     const item: SponsoredAd = {
       id: `ad_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -1039,22 +1091,35 @@ export class OfflineAdRepo implements IAdRepo {
       productName: ad.productName,
       destinationType,
       destinationValue,
+      linkUrl: destinationType === "link" ? destinationValue : ad.linkUrl?.trim() || undefined,
       paymentAmountKz: ad.paymentAmountKz,
       paymentProofUrl: ad.paymentProofUrl,
       title: ad.title || "Campanha Patrocinada",
-      subtitle: ad.subtitle || "",
+      subtitle: description,
+      description,
+      ctaText: ad.ctaText?.trim() || "Ver oferta",
+      order: Number(ad.order ?? 0),
+      bannerCategory,
+      priority: Number(ad.priority ?? 0),
+      durationSec:
+        ad.durationSec !== undefined && ad.durationSec !== null && Number(ad.durationSec) > 0
+          ? clampBannerDurationSec(ad.durationSec)
+          : null,
+      isPaid,
+      isSuspended,
       imageUrl:
         ad.imageUrl ||
         (advertiserType === "loja" ? targetStore?.facadeImage || targetStore?.logo || "" : ""),
       videoUrl: ad.videoUrl || null,
       mediaType,
       position: ad.position || "topo",
-      startDate: ad.startDate || new Date().toISOString(),
-      endDate: ad.endDate || new Date(Date.now() + 30 * 86400000).toISOString(),
+      startDate,
+      endDate,
       views: 0,
       clicks: 0,
-      active: Boolean(ad.active),
-      status: ad.status || "pendente",
+      active: finalActive,
+      status: finalStatus,
+      statusReason: ad.statusReason ?? null,
       createdAt: new Date().toISOString(),
     };
     saveAds([item, ...getStoredAds()]);
@@ -1069,6 +1134,13 @@ export class OfflineAdRepo implements IAdRepo {
     }
 
     const merged: SponsoredAd = { ...existing, ...updates };
+    if (
+      merged.startDate &&
+      merged.endDate &&
+      new Date(merged.endDate).getTime() < new Date(merged.startDate).getTime()
+    ) {
+      throw new Error("A data de fim do anúncio deve ser igual ou posterior à data de início.");
+    }
     const stores = getStoredStores();
     const advertiserType = resolveAdAdvertiserType(merged);
     const targetStore =
@@ -1084,12 +1156,38 @@ export class OfflineAdRepo implements IAdRepo {
       throw new Error("Indica o nome do anunciante externo.");
     }
 
-    const { destinationType, destinationValue } = this.normalizeDestination(merged);
+    const { destinationType, destinationValue } = this.normalizeDestination({
+      ...merged,
+      destinationValue:
+        updates.destinationValue ??
+        updates.linkUrl ??
+        merged.destinationValue ??
+        merged.linkUrl,
+    });
 
     const mediaType: "imagem" | "video" =
       merged.mediaType === "video" || (Boolean(merged.videoUrl) && merged.mediaType !== "imagem")
         ? "video"
         : "imagem";
+
+    const isSuspended =
+      updates.isSuspended !== undefined
+        ? Boolean(updates.isSuspended)
+        : updates.status === "suspenso"
+        ? true
+        : updates.status === "aprovado"
+        ? false
+        : Boolean(merged.isSuspended);
+    const description = (updates.description ?? updates.subtitle ?? merged.description ?? merged.subtitle ?? "").trim();
+
+    const finalStatus: SponsoredAd["status"] = isSuspended ? "suspenso" : merged.status;
+    const finalActive =
+      isSuspended ||
+      finalStatus === "rascunho" ||
+      finalStatus === "rejeitado" ||
+      finalStatus === "expirado"
+        ? false
+        : Boolean(merged.active);
 
     const updated: SponsoredAd = {
       ...merged,
@@ -1104,6 +1202,23 @@ export class OfflineAdRepo implements IAdRepo {
       storeName: advertiserType === "loja" ? targetStore?.name || merged.storeName : undefined,
       destinationType,
       destinationValue,
+      linkUrl: destinationType === "link" ? destinationValue : merged.linkUrl,
+      subtitle: description,
+      description,
+      ctaText: merged.ctaText?.trim() || "Ver oferta",
+      order: Number(merged.order ?? 0),
+      priority: Number(merged.priority ?? 0),
+      bannerCategory:
+        merged.bannerCategory || (advertiserType === "plataforma" ? "publico" : "patrocinado"),
+      durationSec:
+        merged.durationSec !== undefined && merged.durationSec !== null && Number(merged.durationSec) > 0
+          ? clampBannerDurationSec(merged.durationSec)
+          : null,
+      isPaid: isBannerPaid(merged),
+      isSuspended,
+      active: finalActive,
+      status: finalStatus,
+      statusReason: updates.statusReason !== undefined ? updates.statusReason : existing.statusReason ?? null,
       mediaType,
     };
 
@@ -1111,18 +1226,45 @@ export class OfflineAdRepo implements IAdRepo {
     return updated;
   }
 
-  async updateStatus(id: string, status: SponsoredAd["status"], active: boolean): Promise<void> {
-    if (active) {
+  async updateStatus(
+    id: string,
+    status: SponsoredAd["status"],
+    active: boolean,
+    reason?: string | null
+  ): Promise<void> {
+    const isSuspended = status === "suspenso";
+    const effectiveActive =
+      status === "suspenso" || status === "rejeitado" || status === "rascunho" || status === "expirado"
+        ? false
+        : active;
+
+    if (effectiveActive && status === "aprovado") {
       const ads = getStoredAds();
       const target = ads.find((a) => a.id === id);
       if (target) {
         const stores = getStoredStores();
-        if (!isAdEligibleForPublicDisplay(target, stores)) {
-          throw new Error("Apenas lojas com plano pago activo podem activar anúncios patrocinados.");
+        const advType = resolveAdAdvertiserType(target);
+        if (advType === "loja") {
+          const st = target.storeId ? stores.find((s) => s.id === target.storeId) : undefined;
+          if (!st || !storeHasActivePaidPlan(st)) {
+            throw new Error("Apenas lojas com plano pago activo podem activar anúncios patrocinados.");
+          }
         }
       }
     }
-    saveAds(getStoredAds().map((a) => (a.id === id ? { ...a, status, active } : a)));
+    saveAds(
+      getStoredAds().map((a) =>
+        a.id === id
+          ? {
+              ...a,
+              status,
+              isSuspended,
+              active: effectiveActive,
+              statusReason: reason !== undefined ? reason : a.statusReason ?? null,
+            }
+          : a
+      )
+    );
   }
 
   async trackView(id: string): Promise<void> {
@@ -1360,7 +1502,19 @@ export class OfflineSystemConfigRepo implements ISystemConfigRepo {
   }
 
   async update(updates: Partial<SystemConfig>): Promise<SystemConfig> {
-    const next = { ...getStoredSystemConfig(), ...updates };
+    const current = getStoredSystemConfig();
+    const next: SystemConfig = {
+      ...current,
+      ...updates,
+      bannerDefaultDurationSec:
+        updates.bannerDefaultDurationSec !== undefined
+          ? clampBannerDurationSec(updates.bannerDefaultDurationSec, current.bannerDefaultDurationSec)
+          : clampBannerDurationSec(current.bannerDefaultDurationSec),
+      bannerAutoplay:
+        updates.bannerAutoplay !== undefined
+          ? Boolean(updates.bannerAutoplay)
+          : current.bannerAutoplay ?? true,
+    };
     saveSystemConfig(next);
     return next;
   }

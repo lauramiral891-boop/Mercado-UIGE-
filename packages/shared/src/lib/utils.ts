@@ -235,6 +235,137 @@ export function translateErrorMessage(
   return fallback;
 }
 
+export interface ServerErrorDetail {
+  message: string;
+  code: string | null;
+}
+
+export function createCodedError(err: unknown, fallback = "Erro ao gravar dados no servidor."): Error {
+  const obj = err && typeof err === "object" ? (err as Record<string, unknown>) : null;
+  const rawMessage =
+    typeof err === "string"
+      ? err
+      : obj && typeof obj.message === "string"
+      ? obj.message
+      : fallback;
+  const rawCode =
+    obj && obj.code !== undefined && obj.code !== null
+      ? String(obj.code)
+      : obj && obj.status !== undefined && obj.status !== null
+      ? String(obj.status)
+      : undefined;
+  const enriched = new Error(rawMessage || fallback) as Error & {
+    code?: string;
+    details?: string;
+    hint?: string;
+  };
+  if (rawCode) enriched.code = rawCode;
+  if (obj && typeof obj.details === "string") enriched.details = obj.details;
+  if (obj && typeof obj.hint === "string") enriched.hint = obj.hint;
+  return enriched;
+}
+
+/**
+ * Extrai a mensagem real do servidor traduzida para português e o código técnico (ex.: 42501, PGRST204, 23514)
+ * para exibição clara no painel admin sem respostas vagas como "não é possível".
+ */
+export function extractServerErrorDetail(
+  err: unknown,
+  fallback = "Erro ao executar a operação no servidor."
+): ServerErrorDetail {
+  const obj = err && typeof err === "object" ? (err as Record<string, unknown>) : null;
+  const rawMessage =
+    typeof err === "string"
+      ? err.trim()
+      : obj && typeof obj.message === "string"
+      ? obj.message.trim()
+      : "";
+  const rawDetails = obj && typeof obj.details === "string" ? obj.details.trim() : "";
+
+  let rawCode: string | null = null;
+  if (obj) {
+    const candidate = obj.code ?? obj.error_code ?? obj.status;
+    if (candidate !== undefined && candidate !== null && String(candidate).trim()) {
+      rawCode = String(candidate).trim();
+    }
+  }
+  if (!rawCode && rawMessage) {
+    const matchedCode = rawMessage.match(/\b(PGRST\d+|P\d{4}|42\d{3}|23\d{3}|22\d{3})\b/i);
+    if (matchedCode) rawCode = matchedCode[1].toUpperCase();
+  }
+
+  const lower = `${rawMessage} ${rawDetails}`.toLowerCase();
+
+  // Mensagens já devolvidas pelo nosso servidor/triggers em português
+  if (
+    lower.includes("operação não autorizada") ||
+    lower.includes("apenas lojas com plano pago") ||
+    lower.includes("indica o nome do anunciante") ||
+    lower.includes("destino inválido") ||
+    lower.includes("data de fim") ||
+    lower.includes("anúncio em vídeo") ||
+    lower.includes("duração do banner") ||
+    lower.includes("whatsapp")
+  ) {
+    return { message: rawMessage || fallback, code: rawCode };
+  }
+
+  if (rawCode === "42501" || lower.includes("row-level security") || lower.includes("permission denied")) {
+    return {
+      message:
+        "Permissão recusada pela segurança do servidor (RLS). Confirma se esta conta tem papel de moderador ou super_admin.",
+      code: rawCode || "42501",
+    };
+  }
+
+  if (rawCode === "42703" || rawCode === "PGRST204" || lower.includes("column") && lower.includes("does not exist")) {
+    return {
+      message:
+        "Coluna em falta na base de dados do servidor. Executa a migração SQL mais recente no Supabase.",
+      code: rawCode || "42703",
+    };
+  }
+
+  if (rawCode === "23514" || lower.includes("check constraint")) {
+    return {
+      message: `Valor rejeitado pelas regras da base de dados${rawDetails ? `: ${rawDetails}` : "."}`,
+      code: rawCode || "23514",
+    };
+  }
+
+  if (rawCode === "23502" || lower.includes("not-null constraint") || lower.includes("null value in column")) {
+    return {
+      message: `Campo obrigatório em falta no servidor${rawDetails ? ` (${rawDetails})` : "."}`,
+      code: rawCode || "23502",
+    };
+  }
+
+  if (rawCode === "23503" || lower.includes("foreign key constraint")) {
+    return {
+      message: "Referência inexistente na base de dados (loja, produto ou conta inválida).",
+      code: rawCode || "23503",
+    };
+  }
+
+  if (rawCode === "22P02" || lower.includes("invalid input syntax")) {
+    return {
+      message: "Formato inválido enviado ao servidor (data/hora ou identificador incorrecto).",
+      code: rawCode || "22P02",
+    };
+  }
+
+  const sentinel = "__UNMATCHED_ERROR__";
+  const translated = translateErrorMessage(err, sentinel);
+  if (translated !== sentinel) {
+    return { message: translated, code: rawCode };
+  }
+
+  return {
+    message: rawMessage || fallback,
+    code: rawCode,
+  };
+}
+
 /**
  * Normaliza texto: minúsculas, sem acentos, sem pontuação e sem espaços a mais.
  */

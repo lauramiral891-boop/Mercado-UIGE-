@@ -19,6 +19,8 @@ export type AdAdvertiserType = "plataforma" | "externo" | "loja";
 
 export type AdDestinationType = "loja" | "produto" | "link" | "whatsapp";
 
+export type BannerCategory = "publico" | "patrocinado" | "promocional";
+
 export type DeliveryStatus =
   | "Pedido"
   | "Aceite pelo entregador"
@@ -246,16 +248,26 @@ export interface SponsoredAd {
   paymentProofUrl?: string;
   title: string;
   subtitle?: string;
+  description?: string;
+  ctaText?: string;
+  linkUrl?: string;
+  order?: number;
+  bannerCategory?: BannerCategory;
+  priority?: number;
+  durationSec?: number | null;
+  isPaid?: boolean;
+  isSuspended?: boolean;
   imageUrl: string;
   videoUrl?: string | null;
   mediaType?: "imagem" | "video";
   position: AdPosition;
-  startDate: string;
-  endDate: string;
+  startDate?: string | null;
+  endDate?: string | null;
   views: number;
   clicks: number;
   active: boolean;
-  status: "pendente" | "aprovado" | "rejeitado" | "expirado";
+  status: "rascunho" | "pendente" | "aprovado" | "rejeitado" | "expirado" | "suspenso";
+  statusReason?: string | null;
   createdAt: string;
 }
 
@@ -336,6 +348,8 @@ export interface SystemConfig {
   requireProductApproval?: boolean;
   maintenanceMode?: boolean;
   maintenanceMessage?: string;
+  bannerDefaultDurationSec: number;
+  bannerAutoplay: boolean;
 }
 
 export interface AuditLogItem {

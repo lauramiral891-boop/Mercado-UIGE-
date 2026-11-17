@@ -7,10 +7,14 @@ import {
   saveAds,
   getStoredStores,
 } from "../../lib/storage";
-import { smartSearch, generateDeliveryCode } from "../../lib/utils";
+import { smartSearch, generateDeliveryCode, createCodedError } from "../../lib/utils";
 import {
+  clampBannerDurationSec,
   isAdEligibleForPublicDisplay,
+  isAdWithinScheduleWindow,
+  isBannerPaid,
   resolveAdAdvertiserType,
+  sortBannersForCarousel,
   validateSafeAdDestination,
 } from "../../lib/adDelivery";
 import {
@@ -1094,6 +1098,19 @@ export class SupabaseAdRepo implements IAdRepo {
         ? "loja"
         : "plataforma";
 
+    const bannerCategory =
+      a.categoria_banner === "publico" ||
+      a.categoria_banner === "patrocinado" ||
+      a.categoria_banner === "promocional"
+        ? a.categoria_banner
+        : advertiserType === "plataforma"
+        ? "publico"
+        : "patrocinado";
+
+    const description = a.descricao ?? a.subtitulo ?? "";
+    const isSuspended = Boolean(a.suspenso) || a.estado === "suspenso";
+    const status = isSuspended ? "suspenso" : a.estado || "pendente";
+
     return {
       id: a.id,
       advertiserType,
@@ -1112,27 +1129,44 @@ export class SupabaseAdRepo implements IAdRepo {
       productName: a.produtos?.nome || undefined,
       destinationType:
         a.tipo_destino || (a.produto_id ? "produto" : "loja"),
-      destinationValue: a.destino_valor || undefined,
+      destinationValue: a.destino_valor || a.link_destino || undefined,
       title: a.titulo,
-      subtitle: a.subtitulo || "",
+      subtitle: description,
+      description,
+      ctaText: a.texto_botao || "Ver oferta",
+      linkUrl: a.link_destino || (a.tipo_destino === "link" ? a.destino_valor : undefined),
+      order: Number(a.ordem ?? 0),
+      bannerCategory,
+      priority: Number(a.prioridade ?? 0),
+      durationSec:
+        a.duracao_segundos !== undefined && a.duracao_segundos !== null && Number(a.duracao_segundos) > 0
+          ? clampBannerDurationSec(a.duracao_segundos)
+          : null,
+      isPaid:
+        typeof a.pago === "boolean"
+          ? a.pago
+          : isBannerPaid({ advertiserType, bannerCategory }),
+      isSuspended,
       imageUrl: a.imagem_url || a.lojas?.foto_fachada_url || a.lojas?.logo_url || "",
       videoUrl: a.video_url || null,
       mediaType,
       position: a.posicao || "topo",
-      startDate: a.data_inicio,
-      endDate: a.data_fim,
+      startDate: a.data_inicio ?? null,
+      endDate: a.data_fim ?? null,
       views: a.visualizacoes || 0,
       clicks: a.cliques || 0,
-      active: Boolean(a.ativo),
-      status: a.estado || "pendente",
+      active: isSuspended ? false : Boolean(a.ativo),
+      status,
+      statusReason: a.motivo_estado ?? null,
       createdAt: a.criado_em,
     };
   }
 
   private validateAndBuildDestination(ad: Partial<SponsoredAd>) {
     const destinationType = ad.destinationType || (ad.productId ? "produto" : "loja");
+    const rawDest = ad.destinationValue || ad.linkUrl;
     if (destinationType === "link" || destinationType === "whatsapp") {
-      const check = validateSafeAdDestination(destinationType, ad.destinationValue, {
+      const check = validateSafeAdDestination(destinationType, rawDest, {
         storeId: ad.storeId,
         productId: ad.productId,
       });
@@ -1145,40 +1179,42 @@ export class SupabaseAdRepo implements IAdRepo {
       destinationType,
       destinationValue:
         destinationType === "produto"
-          ? ad.productId || ad.destinationValue || null
-          : ad.storeId || ad.destinationValue || null,
+          ? ad.productId || rawDest || null
+          : ad.storeId || rawDest || null,
     };
   }
 
   async getAll(includeAll = false): Promise<SponsoredAd[]> {
     if (!isSupabaseConfigured) return fallbackAdRepo.getAll(includeAll);
-    try {
-      const { data, error } = await supabase
-        .from("anuncios")
-        .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
-        .order("criado_em", { ascending: false });
-      if (error || !data) return fallbackAdRepo.getAll(includeAll);
-      const mapped = data.map((a) => this.mapAdRow(a));
-      saveAds(mapped);
-      if (includeAll) return mapped;
-      const now = Date.now();
-      const cachedStores = getStoredStores();
-      return mapped.filter(
-        (a) =>
-          a.active &&
-          a.status === "aprovado" &&
-          new Date(a.startDate).getTime() <= now &&
-          new Date(a.endDate).getTime() >= now &&
-          isAdEligibleForPublicDisplay(a, cachedStores, now)
-      );
-    } catch {
-      return fallbackAdRepo.getAll(includeAll);
+    const { data, error } = await supabase
+      .from("anuncios")
+      .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
+      .order("criado_em", { ascending: false });
+    if (error) {
+      if (includeAll) {
+        throw createCodedError(error, "Erro ao carregar anúncios do servidor.");
+      }
+      return fallbackAdRepo.getAll(false);
     }
+    if (!data) return includeAll ? [] : fallbackAdRepo.getAll(false);
+    const mapped = sortBannersForCarousel(data.map((a) => this.mapAdRow(a)));
+    saveAds(mapped);
+    if (includeAll) return mapped;
+    const now = Date.now();
+    const cachedStores = getStoredStores();
+    return mapped.filter(
+      (a) =>
+        a.active &&
+        !a.isSuspended &&
+        a.status === "aprovado" &&
+        isAdWithinScheduleWindow(a, now) &&
+        isAdEligibleForPublicDisplay(a, cachedStores, now)
+    );
   }
 
   async getActiveByPosition(position: AdPosition): Promise<SponsoredAd[]> {
     const active = await this.getAll(false);
-    return active.filter((a) => a.position === position);
+    return sortBannersForCarousel(active.filter((a) => a.position === position));
   }
 
   async create(ad: Partial<SponsoredAd>): Promise<SponsoredAd> {
@@ -1195,163 +1231,266 @@ export class SupabaseAdRepo implements IAdRepo {
         ? "video"
         : "imagem";
 
+    const description = (ad.description ?? ad.subtitle ?? "").trim();
+    const bannerCategory =
+      ad.bannerCategory || (advertiserType === "plataforma" ? "publico" : "patrocinado");
+    const isPaid =
+      typeof ad.isPaid === "boolean"
+        ? ad.isPaid
+        : isBannerPaid({ ...ad, advertiserType, bannerCategory });
+    const isSuspended = Boolean(ad.isSuspended) || ad.status === "suspenso";
+    const durationSec =
+      ad.durationSec !== undefined && ad.durationSec !== null && Number(ad.durationSec) > 0
+        ? clampBannerDurationSec(ad.durationSec)
+        : null;
+
+    const finalStatus: SponsoredAd["status"] = isSuspended ? "suspenso" : ad.status || "aprovado";
+    const finalActive =
+      isSuspended || finalStatus === "rascunho" || finalStatus === "rejeitado" || finalStatus === "expirado"
+        ? false
+        : ad.active ?? true;
+
     const basePayload = {
       loja_id: advertiserType === "loja" ? ad.storeId || null : null,
       vendedor_id: ad.sellerId || null,
       produto_id: destinationType === "produto" ? ad.productId || destinationValue || null : ad.productId || null,
       titulo: ad.title || "Campanha Patrocinada",
-      subtitulo: ad.subtitle || "",
+      subtitulo: description,
       imagem_url: ad.imageUrl || null,
       posicao: ad.position || "topo",
-      data_inicio: ad.startDate || new Date().toISOString(),
-      data_fim: ad.endDate || new Date(Date.now() + 30 * 86400000).toISOString(),
-      ativo: Boolean(ad.active),
-      estado: ad.status || "pendente",
+      data_inicio: ad.startDate !== undefined ? ad.startDate : null,
+      data_fim: ad.endDate !== undefined ? ad.endDate : null,
+      ativo: finalActive,
+      estado: finalStatus,
     };
 
-    try {
-      let result = await supabase
+    const v7Payload = {
+      ...basePayload,
+      video_url: ad.videoUrl || null,
+      tipo_media: mediaType,
+      tipo_anunciante: advertiserType,
+      nome_anunciante:
+        advertiserType === "plataforma"
+          ? ad.advertiserName?.trim() || "Mercado Uíge"
+          : advertiserType === "externo"
+          ? ad.advertiserName?.trim() || null
+          : null,
+      tipo_destino: destinationType,
+      destino_valor: destinationValue || null,
+    };
+
+    const v8Payload = {
+      ...v7Payload,
+      descricao: description,
+      texto_botao: ad.ctaText?.trim() || "Ver oferta",
+      link_destino: destinationType === "link" ? destinationValue || null : ad.linkUrl?.trim() || null,
+      ordem: Number(ad.order ?? 0),
+      categoria_banner: bannerCategory,
+      prioridade: Number(ad.priority ?? 0),
+      duracao_segundos: durationSec,
+      pago: isPaid,
+      suspenso: isSuspended,
+    };
+
+    const v9Payload = {
+      ...v8Payload,
+      motivo_estado: ad.statusReason ?? null,
+    };
+
+    let result = await supabase
+      .from("anuncios")
+      .insert(v9Payload)
+      .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
+      .single();
+
+    if (result.error && (result.error.code === "42703" || result.error.code === "PGRST204")) {
+      result = await supabase
         .from("anuncios")
-        .insert({
-          ...basePayload,
-          video_url: ad.videoUrl || null,
-          tipo_media: mediaType,
-          tipo_anunciante: advertiserType,
-          nome_anunciante:
-            advertiserType === "plataforma"
-              ? ad.advertiserName?.trim() || "Mercado Uíge"
-              : advertiserType === "externo"
-              ? ad.advertiserName?.trim() || null
-              : null,
-          tipo_destino: destinationType,
-          destino_valor: destinationValue || null,
-        })
+        .insert(v8Payload)
         .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
         .single();
-
-      // Compatibilidade se colunas novas ainda não estiverem aplicadas no SQL Editor
-      if (result.error && (result.error.code === "42703" || result.error.code === "PGRST204")) {
-        result = await supabase
-          .from("anuncios")
-          .insert({
-            ...basePayload,
-            video_url: ad.videoUrl || null,
-            tipo_media: mediaType,
-          })
-          .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
-          .single();
-      }
-
-      if (result.error) {
-        if (result.error.code === "P0001" || result.error.message?.toLowerCase().includes("plano")) {
-          throw new Error(result.error.message);
-        }
-        return fallbackAdRepo.create(ad);
-      }
-      if (!result.data) return fallbackAdRepo.create(ad);
-      const mapped = this.mapAdRow(result.data);
-      // Preserva metadados locais quando colunas opcionais não existem no servidor
-      return {
-        ...mapped,
-        advertiserType,
-        advertiserName: ad.advertiserName || mapped.advertiserName,
-        destinationType,
-        destinationValue: destinationValue || mapped.destinationValue,
-      };
-    } catch (err: any) {
-      if (err?.message?.toLowerCase().includes("plano") || err?.message?.toLowerCase().includes("https")) {
-        throw err;
-      }
-      return fallbackAdRepo.create(ad);
     }
+
+    if (result.error && (result.error.code === "42703" || result.error.code === "PGRST204")) {
+      result = await supabase
+        .from("anuncios")
+        .insert(v7Payload)
+        .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
+        .single();
+    }
+
+    if (result.error) {
+      throw createCodedError(result.error, "Erro ao criar banner no servidor.");
+    }
+    if (!result.data) {
+      throw new Error("O servidor não devolveu os dados do banner criado.");
+    }
+    return this.mapAdRow(result.data);
   }
 
   async update(id: string, updates: Partial<SponsoredAd>): Promise<SponsoredAd> {
-    const localUpdated = await fallbackAdRepo.update(id, updates);
-    if (!isSupabaseConfigured) return localUpdated;
+    if (!isSupabaseConfigured) return fallbackAdRepo.update(id, updates);
 
-    const advertiserType = resolveAdAdvertiserType(localUpdated);
-    const { destinationType, destinationValue } = this.validateAndBuildDestination(localUpdated);
+    // Garante leitura do registo actual quando o update é parcial (ex.: reordenação rápida)
+    let baseAd = (await fallbackAdRepo.getAll(true)).find((a) => a.id === id);
+    if (!baseAd) {
+      const { data: currentRow, error: fetchErr } = await supabase
+        .from("anuncios")
+        .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
+        .eq("id", id)
+        .single();
+      if (fetchErr || !currentRow) {
+        throw createCodedError(fetchErr || "Anúncio não encontrado no servidor.");
+      }
+      baseAd = this.mapAdRow(currentRow);
+    }
+
+    const merged: SponsoredAd = { ...baseAd, ...updates };
+    const advertiserType = resolveAdAdvertiserType(merged);
+    const { destinationType, destinationValue } = this.validateAndBuildDestination(merged);
     const mediaType: "imagem" | "video" =
-      localUpdated.mediaType === "video" ||
-      (Boolean(localUpdated.videoUrl) && localUpdated.mediaType !== "imagem")
+      merged.mediaType === "video" ||
+      (Boolean(merged.videoUrl) && merged.mediaType !== "imagem")
         ? "video"
         : "imagem";
 
-    try {
-      let result = await supabase
+    const isSuspended =
+      updates.isSuspended !== undefined
+        ? Boolean(updates.isSuspended)
+        : updates.status === "suspenso"
+        ? true
+        : updates.status === "aprovado"
+        ? false
+        : Boolean(merged.isSuspended);
+    const finalStatus: SponsoredAd["status"] = isSuspended ? "suspenso" : merged.status;
+    const finalActive =
+      isSuspended || finalStatus === "rascunho" || finalStatus === "rejeitado" || finalStatus === "expirado"
+        ? false
+        : Boolean(merged.active);
+
+    const v7Payload = {
+      loja_id: advertiserType === "loja" ? merged.storeId || null : null,
+      produto_id:
+        destinationType === "produto"
+          ? merged.productId || destinationValue || null
+          : merged.productId || null,
+      titulo: merged.title,
+      subtitulo: merged.description || merged.subtitle || "",
+      imagem_url: merged.imageUrl || null,
+      video_url: merged.videoUrl || null,
+      tipo_media: mediaType,
+      tipo_anunciante: advertiserType,
+      nome_anunciante:
+        advertiserType === "plataforma"
+          ? merged.advertiserName || "Mercado Uíge"
+          : advertiserType === "externo"
+          ? merged.advertiserName || null
+          : null,
+      tipo_destino: destinationType,
+      destino_valor: destinationValue || null,
+      posicao: merged.position,
+      data_inicio: merged.startDate ?? null,
+      data_fim: merged.endDate ?? null,
+      ativo: finalActive,
+      estado: finalStatus,
+    };
+
+    const v8Payload = {
+      ...v7Payload,
+      descricao: merged.description || merged.subtitle || "",
+      texto_botao: merged.ctaText || "Ver oferta",
+      link_destino:
+        destinationType === "link"
+          ? destinationValue || null
+          : merged.linkUrl || null,
+      ordem: Number(merged.order ?? 0),
+      categoria_banner: merged.bannerCategory || "patrocinado",
+      prioridade: Number(merged.priority ?? 0),
+      duracao_segundos: merged.durationSec ?? null,
+      pago: isBannerPaid(merged),
+      suspenso: isSuspended,
+    };
+
+    const v9Payload = {
+      ...v8Payload,
+      motivo_estado: updates.statusReason !== undefined ? updates.statusReason : merged.statusReason ?? null,
+    };
+
+    let result = await supabase
+      .from("anuncios")
+      .update(v9Payload)
+      .eq("id", id)
+      .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
+      .single();
+
+    if (result.error && (result.error.code === "42703" || result.error.code === "PGRST204")) {
+      result = await supabase
         .from("anuncios")
-        .update({
-          loja_id: advertiserType === "loja" ? localUpdated.storeId || null : null,
-          produto_id:
-            destinationType === "produto"
-              ? localUpdated.productId || destinationValue || null
-              : localUpdated.productId || null,
-          titulo: localUpdated.title,
-          subtitulo: localUpdated.subtitle || "",
-          imagem_url: localUpdated.imageUrl || null,
-          video_url: localUpdated.videoUrl || null,
-          tipo_media: mediaType,
-          tipo_anunciante: advertiserType,
-          nome_anunciante:
-            advertiserType === "plataforma"
-              ? localUpdated.advertiserName || "Mercado Uíge"
-              : advertiserType === "externo"
-              ? localUpdated.advertiserName || null
-              : null,
-          tipo_destino: destinationType,
-          destino_valor: destinationValue || null,
-          posicao: localUpdated.position,
-          data_inicio: localUpdated.startDate,
-          data_fim: localUpdated.endDate,
-          ativo: Boolean(localUpdated.active),
-          estado: localUpdated.status,
-        })
+        .update(v8Payload)
         .eq("id", id)
         .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
         .single();
-
-      if (result.error && (result.error.code === "42703" || result.error.code === "PGRST204")) {
-        result = await supabase
-          .from("anuncios")
-          .update({
-            loja_id: advertiserType === "loja" ? localUpdated.storeId || null : null,
-            titulo: localUpdated.title,
-            subtitulo: localUpdated.subtitle || "",
-            imagem_url: localUpdated.imageUrl || null,
-            posicao: localUpdated.position,
-            data_inicio: localUpdated.startDate,
-            data_fim: localUpdated.endDate,
-            ativo: Boolean(localUpdated.active),
-            estado: localUpdated.status,
-          })
-          .eq("id", id)
-          .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
-          .single();
-      }
-
-      if (result.error) {
-        if (result.error.code === "P0001" || result.error.message?.toLowerCase().includes("plano")) {
-          throw new Error(result.error.message);
-        }
-        return localUpdated;
-      }
-      return result.data ? this.mapAdRow(result.data) : localUpdated;
-    } catch (err: any) {
-      if (err?.message?.toLowerCase().includes("plano") || err?.message?.toLowerCase().includes("https")) {
-        throw err;
-      }
-      return localUpdated;
     }
+
+    if (result.error && (result.error.code === "42703" || result.error.code === "PGRST204")) {
+      result = await supabase
+        .from("anuncios")
+        .update(v7Payload)
+        .eq("id", id)
+        .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
+        .single();
+    }
+
+    if (result.error) {
+      throw createCodedError(result.error, "Erro ao actualizar banner no servidor.");
+    }
+    if (!result.data) {
+      throw new Error("O servidor não devolveu os dados actualizados do banner.");
+    }
+    const mapped = this.mapAdRow(result.data);
+    await fallbackAdRepo.update(id, mapped).catch(() => {});
+    return mapped;
   }
 
-  async updateStatus(id: string, status: SponsoredAd["status"], active: boolean): Promise<void> {
-    await fallbackAdRepo.updateStatus(id, status, active);
-    if (!isSupabaseConfigured) return;
-    const { error } = await supabase.from("anuncios").update({ estado: status, ativo: active }).eq("id", id);
-    if (error && (error.code === "P0001" || error.message?.toLowerCase().includes("plano"))) {
-      throw new Error(error.message);
+  async updateStatus(
+    id: string,
+    status: SponsoredAd["status"],
+    active: boolean,
+    reason?: string | null
+  ): Promise<void> {
+    if (!isSupabaseConfigured) {
+      await fallbackAdRepo.updateStatus(id, status, active, reason);
+      return;
     }
+    const isSuspended = status === "suspenso";
+    const effectiveActive =
+      isSuspended || status === "rejeitado" || status === "rascunho" || status === "expirado"
+        ? false
+        : active;
+    const patchV9: Record<string, unknown> = {
+      estado: status,
+      ativo: effectiveActive,
+      suspenso: isSuspended,
+    };
+    if (reason !== undefined) {
+      patchV9.motivo_estado = reason;
+    }
+
+    let { error } = await supabase.from("anuncios").update(patchV9).eq("id", id);
+    if (error && (error.code === "42703" || error.code === "PGRST204")) {
+      const retry = await supabase
+        .from("anuncios")
+        .update({
+          estado: status === "suspenso" ? "rejeitado" : status === "rascunho" ? "pendente" : status,
+          ativo: effectiveActive,
+        })
+        .eq("id", id);
+      error = retry.error;
+    }
+    if (error) {
+      throw createCodedError(error, "Erro ao alterar o estado do banner no servidor.");
+    }
+    await fallbackAdRepo.updateStatus(id, status, effectiveActive, reason).catch(() => {});
   }
 
   async trackView(id: string): Promise<void> {
@@ -1371,11 +1510,15 @@ export class SupabaseAdRepo implements IAdRepo {
   }
 
   async delete(id: string): Promise<void> {
-    await fallbackAdRepo.delete(id);
-    if (!isSupabaseConfigured) return;
-    try {
-      await supabase.from("anuncios").delete().eq("id", id);
-    } catch {}
+    if (!isSupabaseConfigured) {
+      await fallbackAdRepo.delete(id);
+      return;
+    }
+    const { error } = await supabase.from("anuncios").delete().eq("id", id);
+    if (error) {
+      throw createCodedError(error, "Erro ao eliminar o banner no servidor.");
+    }
+    await fallbackAdRepo.delete(id).catch(() => {});
   }
 }
 
@@ -1718,6 +1861,8 @@ export class SupabaseSystemConfigRepo implements ISystemConfigRepo {
         maintenanceMessage:
           data.mensagem_manutencao ||
           "Estamos em manutenção programada para melhorar o Mercado Uíge. Voltamos em breve.",
+        bannerDefaultDurationSec: clampBannerDurationSec(data.banner_duracao_padrao_seg, 8),
+        bannerAutoplay: data.banner_autoplay === undefined ? true : Boolean(data.banner_autoplay),
       };
       saveSystemConfig(cfg);
       return cfg;
@@ -1728,7 +1873,18 @@ export class SupabaseSystemConfigRepo implements ISystemConfigRepo {
 
   async update(updates: Partial<SystemConfig>): Promise<SystemConfig> {
     const current = await this.get();
-    const merged = { ...current, ...updates };
+    const merged: SystemConfig = {
+      ...current,
+      ...updates,
+      bannerDefaultDurationSec:
+        updates.bannerDefaultDurationSec !== undefined
+          ? clampBannerDurationSec(updates.bannerDefaultDurationSec, current.bannerDefaultDurationSec)
+          : clampBannerDurationSec(current.bannerDefaultDurationSec),
+      bannerAutoplay:
+        updates.bannerAutoplay !== undefined
+          ? Boolean(updates.bannerAutoplay)
+          : current.bannerAutoplay ?? true,
+    };
     if (isSupabaseConfigured) {
       const payload: Record<string, any> = {
         id: "global",
@@ -1745,6 +1901,8 @@ export class SupabaseSystemConfigRepo implements ISystemConfigRepo {
         preco_plano_ambulante_vip: merged.ambulantVipPrice,
         preco_plano_entregador_basico: merged.courierBasicPrice,
         preco_plano_entregador_vip: merged.courierVipPrice,
+        banner_duracao_padrao_seg: merged.bannerDefaultDurationSec,
+        banner_autoplay: merged.bannerAutoplay,
         actualizado_em: new Date().toISOString(),
       };
       if (updates.requireProductApproval !== undefined) {
@@ -1756,10 +1914,16 @@ export class SupabaseSystemConfigRepo implements ISystemConfigRepo {
       if (updates.maintenanceMessage !== undefined) {
         payload.mensagem_manutencao = merged.maintenanceMessage || null;
       }
-      const { error } = await supabase.from("configuracoes_sistema").upsert(payload);
+      let { error } = await supabase.from("configuracoes_sistema").upsert(payload);
+      if (error && (error.code === "42703" || error.code === "PGRST204")) {
+        delete payload.banner_duracao_padrao_seg;
+        delete payload.banner_autoplay;
+        const retry = await supabase.from("configuracoes_sistema").upsert(payload);
+        error = retry.error;
+      }
       if (error) throw error;
     }
-    return fallbackSystemConfigRepo.update(updates);
+    return fallbackSystemConfigRepo.update(merged);
   }
 }
 

@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from "react";
 import { Settings, Shield, Users, Save } from "lucide-react";
 import {
+  BANNER_DURATION_PRESETS,
   SystemConfig,
   User,
   UserRole,
+  clampBannerDurationSec,
   formatUserRole,
   isSuperAdminRole,
 } from "@mercado-uige/shared";
@@ -222,6 +224,75 @@ export const ConfigSection: React.FC<ConfigSectionProps> = ({
           </label>
         </div>
 
+        {/* Configuração Global do Carrossel de Banners */}
+        <div className="p-4 rounded-xl bg-[#111D30] border border-[#26354B] space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <span className="font-black text-white block">Carrossel de Banners (Definição Global)</span>
+              <span className="text-[11px] text-[#A6B2C5]">
+                A app mobile aplica esta duração padrão e reprodução automática ao abrir e actualiza a cada 5 minutos sem precisar de actualização na loja.
+              </span>
+            </div>
+            <label className="inline-flex items-center gap-2.5 cursor-pointer shrink-0 select-none">
+              <input
+                type="checkbox"
+                checked={draft.bannerAutoplay !== false}
+                onChange={(e) => setDraft({ ...draft, bannerAutoplay: e.target.checked })}
+                className="w-5 h-5 accent-[#B7F34A] cursor-pointer"
+              />
+              <span className={`font-black ${draft.bannerAutoplay !== false ? "text-[#B7F34A]" : "text-[#A6B2C5]"}`}>
+                {draft.bannerAutoplay !== false ? "Reprodução automática ligada" : "Reprodução automática desligada"}
+              </span>
+            </label>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] font-bold text-[#A6B2C5] mr-1">Duração padrão:</span>
+            {BANNER_DURATION_PRESETS.map((sec) => {
+              const selected = clampBannerDurationSec(draft.bannerDefaultDurationSec) === sec;
+              return (
+                <button
+                  key={sec}
+                  type="button"
+                  onClick={() => setDraft({ ...draft, bannerDefaultDurationSec: sec })}
+                  className={`px-3 py-1.5 rounded-lg font-black text-[11px] cursor-pointer ${
+                    selected
+                      ? "bg-[#246BFD] text-white"
+                      : "bg-[#172338] border border-[#26354B] text-[#A6B2C5]"
+                  }`}
+                >
+                  {sec}s
+                </button>
+              );
+            })}
+            <div className="flex items-center gap-1.5 ml-auto">
+              <label htmlFor="banner-custom-duration" className="text-[11px] text-[#A6B2C5] font-bold">
+                Personalizada (3–60s):
+              </label>
+              <input
+                id="banner-custom-duration"
+                type="number"
+                min={3}
+                max={60}
+                value={draft.bannerDefaultDurationSec ?? 8}
+                onChange={(e) =>
+                  setDraft({
+                    ...draft,
+                    bannerDefaultDurationSec: Number(e.target.value),
+                  })
+                }
+                onBlur={(e) =>
+                  setDraft({
+                    ...draft,
+                    bannerDefaultDurationSec: clampBannerDurationSec(Number(e.target.value)),
+                  })
+                }
+                className="w-20 p-2 rounded-lg bg-[#172338] border border-[#26354B] text-white font-bold text-center outline-none focus:border-[#246BFD]"
+              />
+            </div>
+          </div>
+        </div>
+
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[#26354B]">
           {!isSuperAdmin && (
             <span className="text-[11px] text-[#A6B2C5]">
@@ -230,7 +301,9 @@ export const ConfigSection: React.FC<ConfigSectionProps> = ({
           )}
           <button
             type="button"
-            onClick={() =>
+            onClick={() => {
+              const bannerDefaultDurationSec = clampBannerDurationSec(draft.bannerDefaultDurationSec);
+              const bannerAutoplay = draft.bannerAutoplay !== false;
               onRequestSaveConfig(
                 isSuperAdmin
                   ? {
@@ -246,6 +319,8 @@ export const ConfigSection: React.FC<ConfigSectionProps> = ({
                       deliveryCommissionPercent: draft.deliveryCommissionPercent,
                       courierMonthlyFee: draft.courierMonthlyFee,
                       requireProductApproval: Boolean(draft.requireProductApproval),
+                      bannerDefaultDurationSec,
+                      bannerAutoplay,
                       adminWhatsapp: draft.adminWhatsapp.trim() || "945379003",
                       autoSuspendReportsThreshold: Math.max(1, draft.autoSuspendReportsThreshold),
                     }
@@ -262,10 +337,12 @@ export const ConfigSection: React.FC<ConfigSectionProps> = ({
                       deliveryCommissionPercent: draft.deliveryCommissionPercent,
                       courierMonthlyFee: draft.courierMonthlyFee,
                       requireProductApproval: Boolean(draft.requireProductApproval),
+                      bannerDefaultDurationSec,
+                      bannerAutoplay,
                     },
-                "Preços, comissões, moderação de artigos e definições globais do sistema"
-              )
-            }
+                "Preços, comissões, carrossel de banners, moderação de artigos e definições globais do sistema"
+              );
+            }}
             className="ml-auto px-5 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black flex items-center gap-2 cursor-pointer"
           >
             <Save size={14} /> Guardar Configurações

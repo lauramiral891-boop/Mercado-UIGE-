@@ -62,6 +62,8 @@ export const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
   requireProductApproval: false,
   maintenanceMode: false,
   maintenanceMessage: "Estamos em manutenção programada para melhorar o Mercado Uíge. Voltamos em breve.",
+  bannerDefaultDurationSec: 8,
+  bannerAutoplay: true,
 };
 
 export const DEFAULT_CATEGORIES: Category[] = [

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { AlertTriangle, X } from "lucide-react";
+import { ServerErrorDetail } from "@mercado-uige/shared";
 
 export interface ConfirmModalProps {
   open: boolean;
@@ -12,6 +13,7 @@ export interface ConfirmModalProps {
   reasonLabel?: string;
   reasonPlaceholder?: string;
   loading?: boolean;
+  serverError?: ServerErrorDetail | null;
   onCancel: () => void;
   onConfirm: (reason?: string) => void;
 }
@@ -27,6 +29,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
   reasonLabel = "Motivo / Nota",
   reasonPlaceholder = "Escreve o motivo detalhado para o registo de auditoria...",
   loading = false,
+  serverError = null,
   onCancel,
   onConfirm,
 }) => {
@@ -112,6 +115,15 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
               className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-xs text-white outline-none focus:border-[#246BFD]"
             />
             {error && <p className="text-[11px] text-red-400 font-bold">{error}</p>}
+          </div>
+        )}
+
+        {serverError && (
+          <div className="p-3 rounded-xl bg-red-500/15 border border-red-500/40 text-red-200 text-xs space-y-1">
+            <p className="font-bold">{serverError.message}</p>
+            {serverError.code && (
+              <p className="text-[10px] font-mono text-red-300/90">Código técnico: {serverError.code}</p>
+            )}
           </div>
         )}
 
