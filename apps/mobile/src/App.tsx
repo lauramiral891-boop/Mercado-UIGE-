@@ -21,12 +21,9 @@ import {
   Heart,
   FileText,
   Bell,
-  Plus,
-  Minus,
   ArrowLeft,
   SlidersHorizontal,
   Star,
-  Flag,
   Truck,
   ShieldCheck,
   MessageCircle,
@@ -36,11 +33,13 @@ import {
 import {
   Product,
   Store,
+  StorePublicStats,
   Category,
   User,
   Order,
   NotificationItem,
   StoreReview,
+  ProductReview,
   SponsoredAd,
   MerchantPayment,
   DeliveryRecord,
@@ -63,6 +62,7 @@ import {
   getLocalPersonalizationSignals,
   resolvePublishAction,
   canShowFullscreenAd,
+  hasAdDestination,
   isAdEligibleForPublicDisplay,
   isEditableElementFocused,
   validateSafeAdDestination,
@@ -73,7 +73,9 @@ import {
   messageRepo,
   userRepo,
   storeRepo,
+  storeFollowerRepo,
   storeReviewRepo,
+  productReviewRepo,
   notificationRepo,
   reportRepo,
   adRepo,
@@ -105,6 +107,8 @@ import { SponsoredMediaView } from "./components/SponsoredMediaView";
 import { FullscreenAdOverlay } from "./components/FullscreenAdOverlay";
 import { CourierView } from "./components/CourierView";
 import { SellerStudioView } from "./components/SellerStudioView";
+import { StoreDetailView } from "./components/StoreDetailView";
+import { CartView } from "./components/CartView";
 
 const CAT_ICON_MAP: Record<string, any> = {
   smartphone: Smartphone,
@@ -140,12 +144,12 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [selectedStore, setSelectedStore] = useState<Store | null>(null);
 
-  // Store Detail: Reviews & Reports
+  // Store & Product Detail: Stats, Followers, Reviews
   const [storeReviews, setStoreReviews] = useState<StoreReview[]>([]);
-  const [reviewStars, setReviewStars] = useState(5);
-  const [reviewComment, setReviewComment] = useState("");
-  const [showStoreReportForm, setShowStoreReportForm] = useState(false);
-  const [storeReportReason, setStoreReportReason] = useState("");
+  const [storeStats, setStoreStats] = useState<StorePublicStats | null>(null);
+  const [isFollowingStore, setIsFollowingStore] = useState(false);
+  const [storeFollowersCount, setStoreFollowersCount] = useState(0);
+  const [productReviews, setProductReviews] = useState<ProductReview[]>([]);
   const [storeTypeFilter, setStoreTypeFilter] = useState<"todos" | StoreType>("todos");
   const [usedStoreTypeFilter, setUsedStoreTypeFilter] = useState<"todos" | StoreType>("todos");
 
@@ -253,19 +257,35 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
     }
   };
 
-  const openProductDetails = (product: Product) => {
+  const openProductDetails = async (product: Product) => {
     recordProductClick(product);
     setSelectedProduct(product);
+    setProductReviews([]);
+    try {
+      const revs = await productReviewRepo.getByProduct(product.id);
+      setProductReviews(revs);
+    } catch {
+      setProductReviews([]);
+    }
   };
 
   const openStoreDetails = async (store: Store) => {
     setSelectedStore(store);
-    setShowStoreReportForm(false);
-    setStoreReportReason("");
+    setStoreStats(null);
+    setIsFollowingStore(false);
+    setStoreFollowersCount(Number(store.followersCount || 0));
     navigateTo("store");
     try {
-      const revs = await storeReviewRepo.getByStore(store.id);
+      const [revs, stats, followersTotal, following] = await Promise.all([
+        storeReviewRepo.getByStore(store.id),
+        storeRepo.getPublicStats(store.id),
+        storeFollowerRepo.getFollowerCount(store.id),
+        user ? storeFollowerRepo.isFollowing(store.id, user.id) : Promise.resolve(false),
+      ]);
       setStoreReviews(revs);
+      setStoreStats(stats);
+      setStoreFollowersCount(stats?.followersCount ?? followersTotal);
+      setIsFollowingStore(following);
     } catch {
       setStoreReviews([]);
     }
@@ -602,6 +622,9 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
   };
 
   const handleOpenSponsoredAd = (ad: SponsoredAd, forceOpenStore = false) => {
+    if (!forceOpenStore && !hasAdDestination(ad)) {
+      return;
+    }
     adRepo.trackClick(ad.id).catch(() => {});
     const destType = ad.destinationType || (ad.productId ? "produto" : "loja");
 
@@ -938,60 +961,125 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
       nativePlugins.hapticFeedback(40);
       showToast(
         createdOrders.length > 1
-          ? `${createdOrders.length} encomendas guardadas! Podes enviar por WhatsApp abaixo.`
+          ? `${createdOrders.length} encomendas criadas! Envia cada uma pelo WhatsApp abaixo.`
           : navigator.onLine
-          ? "Encomenda guardada! Toca em Enviar pedido por WhatsApp."
+          ? "Encomenda criada! Toca no botão WhatsApp da loja para enviar."
           : "Encomenda guardada offline! Podes enviar por WhatsApp ou aguardar rede."
       );
-      navigateTo("orders");
+      navigateTo("cart");
     } catch (err: unknown) {
       showToast(translateErrorMessage(err, "Não foi possível confirmar a encomenda. Tenta novamente."));
     }
   };
 
-  // Store Review & Report Handlers
-  const handleSubmitStoreReview = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleBuyNow = (product: Product, qty = 1, variant?: string) => {
+    if (Number(product.stock) <= 0) {
+      showToast("Lamentamos, este produto está de momento esgotado.");
+      return;
+    }
+    setCart((prev) => {
+      const idx = prev.findIndex((item) => item.productId === product.id);
+      if (idx !== -1) {
+        return prev.map((item, i) =>
+          i === idx ? { ...item, qty: Math.max(qty, item.qty), selectedVariant: variant || item.selectedVariant } : item
+        );
+      }
+      return [...prev, { productId: product.id, qty, selectedVariant: variant }];
+    });
+    setSelectedProduct(null);
+    navigateTo("cart");
+  };
+
+  const handleToggleFollowStore = async () => {
+    if (!selectedStore) return;
+    if (!user) {
+      setAuthModalMode("login");
+      setAuthModalOpen(true);
+      showToast("Inicia sessão para seguir esta loja.");
+      return;
+    }
+    try {
+      const result = await storeFollowerRepo.toggle(selectedStore.id, user.id);
+      setIsFollowingStore(result.following);
+      setStoreFollowersCount(result.count);
+      setSelectedStore((prev) =>
+        prev ? { ...prev, followersCount: result.count } : prev
+      );
+      setStores((prev) =>
+        prev.map((s) =>
+          s.id === selectedStore.id ? { ...s, followersCount: result.count } : s
+        )
+      );
+      showToast(result.following ? "A seguir loja ✓" : "Deixaste de seguir esta loja.");
+    } catch (err: unknown) {
+      showToast(translateErrorMessage(err, "Não foi possível actualizar o seguimento da loja."));
+    }
+  };
+
+  const handleSubmitStoreReviewPayload = async (payload: {
+    stars: number;
+    comment: string;
+    photos: string[];
+  }) => {
     if (!selectedStore) return;
     if (!user) {
       setAuthModalMode("login");
       setAuthModalOpen(true);
       return;
     }
+    const created = await storeReviewRepo.create({
+      storeId: selectedStore.id,
+      userId: user.id,
+      userName: user.name,
+      userAvatar: user.avatar || undefined,
+      stars: payload.stars,
+      comment: payload.comment,
+      photos: payload.photos,
+    });
+    setStoreReviews((prev) => [created, ...prev.filter((r) => r.userId !== user.id)]);
     try {
-      const created = await storeReviewRepo.create({
-        storeId: selectedStore.id,
-        userId: user.id,
-        userName: user.name,
-        stars: reviewStars,
-        comment: reviewComment.trim(),
-      });
-      setStoreReviews((prev) => [created, ...prev.filter((r) => r.userId !== user.id)]);
-      setReviewComment("");
-      showToast("Avaliação da loja guardada ✓");
-      await loadData();
-    } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível enviar a avaliação."));
-    }
+      const updatedStats = await storeRepo.getPublicStats(selectedStore.id);
+      if (updatedStats) setStoreStats(updatedStats);
+    } catch {}
+    showToast("Avaliação da loja guardada ✓");
+    await loadData();
   };
 
-  const handleSubmitStoreReport = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedStore || !storeReportReason.trim()) return;
-    try {
-      await reportRepo.create({
-        reporterId: user?.id || "anon",
-        storeId: selectedStore.id,
-        storeName: selectedStore.name,
-        reason: storeReportReason.trim(),
-      });
-      setShowStoreReportForm(false);
-      setStoreReportReason("");
-      showToast("Denúncia contra a loja recebida para verificação.");
-      await loadData();
-    } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível enviar a denúncia."));
+  const handleSubmitStoreReportReason = async (reason: string) => {
+    if (!selectedStore || !reason.trim()) return;
+    await reportRepo.create({
+      reporterId: user?.id || "anon",
+      storeId: selectedStore.id,
+      storeName: selectedStore.name,
+      reason: reason.trim(),
+    });
+    showToast("Denúncia contra a loja recebida para verificação.");
+    await loadData();
+  };
+
+  const handleSubmitProductReview = async (payload: {
+    stars: number;
+    comment: string;
+    photos: string[];
+  }) => {
+    if (!selectedProduct) return;
+    if (!user) {
+      setAuthModalMode("login");
+      setAuthModalOpen(true);
+      return;
     }
+    const created = await productReviewRepo.create({
+      productId: selectedProduct.id,
+      userId: user.id,
+      userName: user.name,
+      userAvatar: user.avatar || undefined,
+      stars: payload.stars,
+      comment: payload.comment,
+      photos: payload.photos,
+    });
+    setProductReviews((prev) => [created, ...prev.filter((r) => r.userId !== user.id)]);
+    showToast("Avaliação do artigo publicada ✓");
+    await loadData();
   };
 
   // Direct Message to Seller
@@ -1135,8 +1223,8 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-4 py-2 sm:py-3">
         {/* VIEW: HOME */}
         {view === "home" && (
-          <div className="space-y-6 anim-fadeUp">
-            {/* Carrossel de Banners (reutilizando anuncios + config global de duração e autoplay) */}
+          <div className="space-y-4 anim-fadeUp">
+            {/* Carrossel de Banners (16:9 máx. 210px, oculto se não houver banners activos) */}
             <HomeBannerCarousel
               banners={topAds}
               autoplay={systemConfig.bannerAutoplay !== false}
@@ -1144,9 +1232,6 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
               activeIndex={adSlideIdx}
               onActiveIndexChange={setAdSlideIdx}
               onOpenBanner={(banner) => handleOpenSponsoredAd(banner)}
-              onExploreCatalog={() => handlePerformSearch("")}
-              onOpenStores={() => navigateTo("stores")}
-              onOpenUsed={() => navigateTo("used")}
             />
 
             {/* Categorias Principais */}
@@ -1476,181 +1561,33 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
         )}
 
         {/* VIEW: STORE DETAIL */}
-        {view === "store" && selectedStore && (() => {
-          const storeProducts = publicProducts.filter(
-            (p) => p.storeId === selectedStore.id || p.sellerId === selectedStore.ownerId
-          );
-          return (
-            <div className="space-y-4 anim-fadeUp">
-              <div className="flex items-center justify-between gap-2">
-                <button
-                  type="button"
-                  onClick={() => navigateTo("stores")}
-                  className="inline-flex items-center gap-1.5 text-xs font-bold text-[#246BFD] cursor-pointer"
-                >
-                  <ArrowLeft size={14} /> Voltar às Lojas
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowStoreReportForm(!showStoreReportForm)}
-                  className="inline-flex items-center gap-1 text-xs font-bold text-red-400 cursor-pointer"
-                >
-                  <Flag size={13} /> Denunciar Loja
-                </button>
-              </div>
-
-              {showStoreReportForm && (
-                <form
-                  onSubmit={handleSubmitStoreReport}
-                  className="p-4 rounded-2xl border border-red-500/30 bg-red-500/10 space-y-2 text-xs"
-                >
-                  <label className="font-bold block text-red-300">Motivo da denúncia contra esta loja</label>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      required
-                      value={storeReportReason}
-                      onChange={(e) => setStoreReportReason(e.target.value)}
-                      placeholder="Ex: Produto falsificado, cobrança indevida ou loja encerrada"
-                      className="flex-1 min-w-0 px-3 py-2 rounded-xl border bg-transparent outline-none"
-                      style={{ borderColor: "var(--border)" }}
-                    />
-                    <button
-                      type="submit"
-                      className="px-4 py-2 rounded-xl bg-red-600 text-white font-black cursor-pointer shrink-0"
-                    >
-                      Enviar
-                    </button>
-                  </div>
-                </form>
-              )}
-
-              <div
-                className="p-4 sm:p-5 rounded-3xl border space-y-3"
-                style={{ backgroundColor: "var(--surface)", borderColor: "var(--border)" }}
-              >
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-3.5 min-w-0">
-                    <div className="w-16 h-16 rounded-2xl bg-[#246BFD]/15 text-[#246BFD] grid place-items-center overflow-hidden shrink-0">
-                      <SafeImage
-                        src={selectedStore.facadeImage || selectedStore.logo}
-                        alt={selectedStore.name}
-                        className="w-full h-full object-cover"
-                        fallbackIcon={<StoreIcon size={28} className="text-[#246BFD]" />}
-                      />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <h1 className="text-lg sm:text-xl font-black truncate">{selectedStore.name}</h1>
-                        {selectedStore.isVip && <Crown size={16} className="text-amber-400 fill-amber-400 shrink-0" />}
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2 text-xs mt-0.5">
-                        <span className="px-2 py-0.5 rounded-full bg-[#246BFD]/15 text-[#246BFD] font-bold text-[10px]">
-                          {formatStoreType(selectedStore.storeType)}
-                        </span>
-                        {selectedStore.code && <span className="opacity-65 font-bold">{selectedStore.code}</span>}
-                        {selectedStore.rating > 0 && (
-                          <span className="text-amber-400 font-black">
-                            ★ {Number(selectedStore.rating).toFixed(1)} ({selectedStore.reviewsCount || storeReviews.length})
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs opacity-75 mt-1">
-                        {selectedStore.address ? `${selectedStore.address} · ` : ""}
-                        {selectedStore.bairro ? `${selectedStore.bairro}, ` : ""}
-                        {selectedStore.municipality}, Uíge
-                      </p>
-                    </div>
-                  </div>
-                </div>
-                {selectedStore.description && <p className="text-xs opacity-80">{selectedStore.description}</p>}
-              </div>
-
-              {/* Artigos da Loja */}
-              {storeProducts.length === 0 ? (
-                <div className="py-8 text-center space-y-1.5">
-                  <Package size={36} className="mx-auto opacity-40 text-[#246BFD]" />
-                  <h3 className="font-bold text-sm">Esta loja ainda não publicou artigos</h3>
-                  <p className="text-xs opacity-60">Volta em breve ou explora outras lojas da província.</p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-                  {storeProducts.map((product) => (
-                    <ProductCard
-                      key={product.id}
-                      product={product}
-                      isFavorite={favorites.includes(product.id)}
-                      onToggleFavorite={handleToggleFavorite}
-                      onAddToCart={(p) => handleAddToCart(p, 1)}
-                      onOpenProduct={openProductDetails}
-                    />
-                  ))}
-                </div>
-              )}
-
-              {/* Avaliações da Loja */}
-              <div
-                className="p-4 sm:p-5 rounded-3xl border space-y-3 text-xs"
-                style={{ backgroundColor: "var(--surface)", borderColor: "var(--border)" }}
-              >
-                <h2 className="font-black text-sm">Avaliações da Loja</h2>
-
-                <form onSubmit={handleSubmitStoreReview} className="space-y-2.5">
-                  <div className="flex items-center gap-1.5">
-                    <span className="font-bold opacity-75 mr-1">Classificação:</span>
-                    {[1, 2, 3, 4, 5].map((star) => (
-                      <button
-                        key={star}
-                        type="button"
-                        onClick={() => setReviewStars(star)}
-                        className="cursor-pointer p-0.5"
-                        aria-label={`${star} estrelas`}
-                      >
-                        <Star
-                          size={18}
-                          className={star <= reviewStars ? "text-amber-400 fill-amber-400" : "opacity-30"}
-                        />
-                      </button>
-                    ))}
-                  </div>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={reviewComment}
-                      onChange={(e) => setReviewComment(e.target.value)}
-                      placeholder="Escreve a tua opinião sobre o atendimento e produtos…"
-                      className="flex-1 min-w-0 px-3 py-2 rounded-xl border bg-transparent outline-none"
-                      style={{ borderColor: "var(--border)" }}
-                    />
-                    <button
-                      type="submit"
-                      className="px-4 py-2 rounded-xl font-black text-slate-950 cursor-pointer shrink-0"
-                      style={{ backgroundColor: "var(--accent)" }}
-                    >
-                      Avaliar
-                    </button>
-                  </div>
-                </form>
-
-                {storeReviews.length === 0 ? (
-                  <p className="opacity-65">Ainda sem avaliações. Sê o primeiro a avaliar esta loja.</p>
-                ) : (
-                  <div className="space-y-2 pt-2 border-t" style={{ borderColor: "var(--border)" }}>
-                    {storeReviews.map((rev) => (
-                      <div key={rev.id} className="space-y-0.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-bold">{rev.userName || "Cliente Uíge"}</span>
-                          <span className="text-amber-400 font-black">{"★".repeat(rev.stars)}</span>
-                        </div>
-                        {rev.comment && <p className="opacity-80">{rev.comment}</p>}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })()}
+        {view === "store" && selectedStore && (
+          <StoreDetailView
+            store={selectedStore}
+            products={publicProducts}
+            reviews={storeReviews}
+            stats={storeStats}
+            orders={orders}
+            currentUser={user}
+            favorites={favorites}
+            isFollowing={isFollowingStore}
+            followersCount={storeFollowersCount}
+            onBack={() => navigateTo("stores")}
+            onToggleFollow={handleToggleFollowStore}
+            onToggleFavorite={handleToggleFavorite}
+            onAddToCart={(p) => handleAddToCart(p, 1)}
+            onOpenProduct={openProductDetails}
+            onSubmitReview={handleSubmitStoreReviewPayload}
+            onSubmitReport={handleSubmitStoreReportReason}
+            onRequireAuth={() => {
+              setAuthModalMode("login");
+              setAuthModalOpen(true);
+            }}
+            onMissingPhone={() =>
+              showToast("Esta loja ainda não disponibilizou contacto WhatsApp.")
+            }
+          />
+        )}
 
         {/* VIEW: SEARCH */}
         {view === "search" && (
@@ -1916,224 +1853,33 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
 
         {/* VIEW: CART (Agrupado por Loja + Opção de Entrega vs Levantamento na Loja) */}
         {view === "cart" && (
-          <div className="max-w-2xl mx-auto space-y-4 anim-fadeUp">
-            <h1 className="text-xl sm:text-2xl font-black">O Meu Carrinho</h1>
-            {cartGroups.length === 0 ? (
-              <div className="py-10 text-center space-y-3">
-                <ShoppingCart size={40} className="mx-auto opacity-40" />
-                <h3 className="font-bold text-sm">O seu carrinho está vazio</h3>
-                <p className="text-xs opacity-60">Explore o catálogo e adicione artigos de lojas locais.</p>
-                <button
-                  type="button"
-                  onClick={() => navigateTo("home")}
-                  className="px-5 py-2.5 rounded-2xl font-black text-xs text-white cursor-pointer"
-                  style={{ backgroundColor: "var(--primary)" }}
-                >
-                  Explorar Artigos
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {cartGroups.map((group) => (
-                  <div
-                    key={group.storeKey}
-                    className="rounded-3xl border overflow-hidden"
-                    style={{ backgroundColor: "var(--surface)", borderColor: "var(--border)" }}
-                  >
-                    {/* Cabeçalho da Loja no Carrinho */}
-                    <div
-                      className="px-4 py-2.5 border-b flex items-center justify-between gap-2 text-xs"
-                      style={{ backgroundColor: "var(--surface-secondary)", borderColor: "var(--border)" }}
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <StoreIcon size={14} className="text-[#246BFD] shrink-0" />
-                        <span className="font-black truncate">{group.storeName}</span>
-                        {group.storeCode && <span className="opacity-65 font-bold">{group.storeCode}</span>}
-                      </div>
-                      <span className="text-[11px] font-bold opacity-75 shrink-0">
-                        {formatStoreType(group.storeType)}
-                      </span>
-                    </div>
-
-                    <div className="divide-y" style={{ borderColor: "var(--border)" }}>
-                      {group.items.map((item) => (
-                        <div key={item.productId} className="p-3.5 flex items-center justify-between gap-3">
-                          <div className="w-14 h-14 rounded-xl overflow-hidden shrink-0 bg-slate-900/50">
-                            <SafeImage
-                              src={item.product.image}
-                              alt={item.product.name}
-                              className="w-full h-full object-cover"
-                              fallbackIcon={<Package size={20} className="text-[#246BFD]" />}
-                            />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <h4 className="font-bold text-xs truncate">{item.product.name}</h4>
-                            <span className="font-black text-xs text-[#B7F34A] block tabular-nums">
-                              {fmtKz(item.product.price)}
-                            </span>
-                            <div className="flex items-center gap-2 mt-1.5">
-                              <button
-                                type="button"
-                                onClick={() => handleUpdateCartQty(item.productId, -1)}
-                                className="w-6 h-6 rounded-lg border grid place-items-center cursor-pointer"
-                                style={{ borderColor: "var(--border)" }}
-                                aria-label="Diminuir quantidade"
-                              >
-                                <Minus size={12} />
-                              </button>
-                              <span className="text-xs font-bold">{item.qty} un.</span>
-                              <button
-                                type="button"
-                                onClick={() => handleUpdateCartQty(item.productId, 1)}
-                                className="w-6 h-6 rounded-lg border grid place-items-center cursor-pointer"
-                                style={{ borderColor: "var(--border)" }}
-                                aria-label="Aumentar quantidade"
-                              >
-                                <Plus size={12} />
-                              </button>
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setCart(cart.filter((c) => c.productId !== item.productId))}
-                            className="p-2 text-red-400 hover:text-red-500 cursor-pointer shrink-0"
-                            aria-label="Remover item do carrinho"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-
-                    <div
-                      className="px-4 py-2.5 border-t flex items-center justify-between text-xs font-bold"
-                      style={{ borderColor: "var(--border)" }}
-                    >
-                      <span className="opacity-70">Subtotal da loja:</span>
-                      <span className="tabular-nums">{fmtKz(group.subtotal)}</span>
-                    </div>
-                  </div>
-                ))}
-
-                {/* Checkout summary */}
-                <div className="p-4 rounded-3xl border space-y-3" style={{ backgroundColor: "var(--surface)", borderColor: "var(--border)" }}>
-                  <div>
-                    <label className="block text-xs font-bold mb-1.5">Modo de Recepção</label>
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <button
-                        type="button"
-                        onClick={() => setCheckoutDeliveryType("entrega")}
-                        className={`p-2.5 rounded-xl font-bold border cursor-pointer flex items-center justify-center gap-1.5 ${
-                          checkoutDeliveryType === "entrega"
-                            ? "bg-[#246BFD] text-white border-[#246BFD]"
-                            : "border-[var(--border)]"
-                        }`}
-                      >
-                        <Truck size={14} />
-                        <span>Entrega ({fmtKz(systemConfig.defaultDeliveryFee)})</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setCheckoutDeliveryType("levantamento")}
-                        className={`p-2.5 rounded-xl font-bold border cursor-pointer flex items-center justify-center gap-1.5 ${
-                          checkoutDeliveryType === "levantamento"
-                            ? "bg-[#246BFD] text-white border-[#246BFD]"
-                            : "border-[var(--border)]"
-                        }`}
-                      >
-                        <StoreIcon size={14} />
-                        <span>Levantamento (Grátis)</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="flex justify-between text-xs gap-2">
-                    <span className="opacity-70">Subtotal ({cartGroups.length} loja{cartGroups.length > 1 ? "s" : ""}):</span>
-                    <span className="font-bold tabular-nums">{fmtKz(cartSubtotal)}</span>
-                  </div>
-                  <div className="flex justify-between text-xs gap-2">
-                    <span className="opacity-70">
-                      {checkoutDeliveryType === "entrega"
-                        ? `Entrega Equipa Mercado Uíge (${cartGroups.length}x):`
-                        : "Levantamento na Loja:"}
-                    </span>
-                    <span className="font-bold tabular-nums">{fmtKz(cartDeliveryTotal)}</span>
-                  </div>
-                  <div className="flex justify-between text-sm font-black pt-2 border-t gap-2" style={{ borderColor: "var(--border)" }}>
-                    <span>Total Geral:</span>
-                    <span className="tabular-nums" style={{ color: "var(--accent)" }}>
-                      {fmtKz(cartTotal)}
-                    </span>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-bold mb-1">Método de Pagamento</label>
-                    <select
-                      value={checkoutPayment}
-                      onChange={(e) => setCheckoutPayment(e.target.value)}
-                      className="w-full p-2.5 rounded-xl border text-xs font-medium outline-none"
-                      style={{
-                        borderColor: "var(--border)",
-                        backgroundColor: "var(--surface-secondary)",
-                        color: "var(--text-primary)",
-                      }}
-                    >
-                      <option value="Multicaixa Express" className="bg-slate-900 text-white">Multicaixa Express</option>
-                      <option value="Pagamento na Entrega" className="bg-slate-900 text-white">Pagamento na Entrega (Dinheiro/TPA)</option>
-                      <option value="Transferência Bancária (IBAN)" className="bg-slate-900 text-white">Transferência Bancária (IBAN)</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-bold mb-1">Telemóvel / WhatsApp do Cliente *</label>
-                    <input
-                      type="tel"
-                      required
-                      value={checkoutPhone}
-                      onChange={(e) => setCheckoutPhone(e.target.value)}
-                      placeholder="Ex: 923000000"
-                      className="w-full p-2.5 rounded-xl border bg-transparent text-xs font-medium outline-none focus:border-[#246BFD]"
-                      style={{ borderColor: "var(--border)" }}
-                    />
-                  </div>
-
-                  {checkoutDeliveryType === "entrega" && (
-                    <div>
-                      <label className="block text-xs font-bold mb-1">Endereço de Entrega no Uíge</label>
-                      <input
-                        type="text"
-                        required
-                        value={checkoutAddress}
-                        onChange={(e) => setCheckoutAddress(e.target.value)}
-                        placeholder="Ex: Bairro Candombe Velho, Rua 4, Casa 12"
-                        className="w-full p-2.5 rounded-xl border bg-transparent text-xs font-medium outline-none focus:border-[#246BFD]"
-                        style={{ borderColor: "var(--border)" }}
-                      />
-                    </div>
-                  )}
-
-                  {cartGroups.length > 1 && (
-                    <p className="text-[11px] opacity-75">
-                      Serão criadas {cartGroups.length} encomendas separadas, uma para cada loja.
-                    </p>
-                  )}
-
-                  <p className="text-[11px] opacity-75">
-                    Ao enviar pelo WhatsApp após finalizar, o teu nome e telefone serão partilhados com a loja.
-                  </p>
-
-                  <button
-                    type="button"
-                    onClick={handleConfirmOrder}
-                    className="w-full py-3.5 rounded-2xl font-black text-sm text-slate-950 shadow-lg cursor-pointer"
-                    style={{ backgroundColor: "var(--accent)" }}
-                  >
-                    Finalizar Encomenda ({fmtKz(cartTotal)})
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
+          <CartView
+            cartGroups={cartGroups}
+            stores={stores}
+            systemConfig={systemConfig}
+            checkoutDeliveryType={checkoutDeliveryType}
+            onChangeDeliveryType={setCheckoutDeliveryType}
+            checkoutPayment={checkoutPayment}
+            onChangePayment={setCheckoutPayment}
+            checkoutPhone={checkoutPhone}
+            onChangePhone={setCheckoutPhone}
+            checkoutAddress={checkoutAddress}
+            onChangeAddress={setCheckoutAddress}
+            cartSubtotal={cartSubtotal}
+            cartDeliveryTotal={cartDeliveryTotal}
+            cartTotal={cartTotal}
+            recentOrders={recentWhatsAppOrders}
+            userName={user?.name}
+            userPhone={user?.phone}
+            onUpdateQty={handleUpdateCartQty}
+            onRemoveItem={(productId) =>
+              setCart(cart.filter((c) => c.productId !== productId))
+            }
+            onConfirmOrder={handleConfirmOrder}
+            onExploreCatalog={() => navigateTo("home")}
+            onViewOrders={() => navigateTo("orders")}
+            onOpenStore={(store) => openStoreDetails(store)}
+          />
         )}
 
         {/* VIEW: ORDERS */}
@@ -2610,22 +2356,24 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
       </main>
 
       {/* Dock Inferior Mobile: Faixa de anúncio fina ACIMA da barra + Barra de Navegação */}
-      <div
-        data-testid="mobile-bottom-dock"
-        className="md:hidden fixed bottom-0 inset-x-0 z-40 flex flex-col pointer-events-none"
-      >
-        <BottomAdStrip
-          ad={activeStripAd}
-          onOpen={(ad) => handleOpenSponsoredAd(ad)}
-          onDismiss={(id) => setDismissedStripAdIds((prev) => (prev.includes(id) ? prev : [...prev, id]))}
-        />
-        <BottomNav
-          activeView={view}
-          onSelectNav={handleSelectBottomNav}
-          cartCount={cartCount}
-          embedded={true}
-        />
-      </div>
+      {view !== "store" && (
+        <div
+          data-testid="mobile-bottom-dock"
+          className="md:hidden fixed bottom-0 inset-x-0 z-40 flex flex-col pointer-events-none"
+        >
+          <BottomAdStrip
+            ad={activeStripAd}
+            onOpen={(ad) => handleOpenSponsoredAd(ad)}
+            onDismiss={(id) => setDismissedStripAdIds((prev) => (prev.includes(id) ? prev : [...prev, id]))}
+          />
+          <BottomNav
+            activeView={view}
+            onSelectNav={handleSelectBottomNav}
+            cartCount={cartCount}
+            embedded={true}
+          />
+        </div>
+      )}
 
       {/* Modals */}
       <LocationModal
@@ -2680,6 +2428,21 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
         isFavorite={selectedProduct ? favorites.includes(selectedProduct.id) : false}
         onToggleFavorite={handleToggleFavorite}
         onAddToCart={handleAddToCart}
+        onBuyNow={handleBuyNow}
+        sellerStore={
+          selectedProduct?.storeId
+            ? stores.find((s) => s.id === selectedProduct.storeId) || null
+            : null
+        }
+        productReviews={productReviews}
+        orders={orders}
+        currentUser={user}
+        onSubmitProductReview={handleSubmitProductReview}
+        onRequireAuth={() => {
+          setSelectedProduct(null);
+          setAuthModalMode("login");
+          setAuthModalOpen(true);
+        }}
         onOpenStore={
           selectedProduct?.storeId && stores.some((s) => s.id === selectedProduct.storeId)
             ? (storeId) => {

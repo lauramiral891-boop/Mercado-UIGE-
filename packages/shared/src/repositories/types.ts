@@ -8,6 +8,8 @@ import {
   AuditLogItem,
   MessageItem,
   StoreReview,
+  ProductReview,
+  StorePublicStats,
   SponsoredAd,
   MerchantPayment,
   DeliveryRecord,
@@ -97,6 +99,7 @@ export interface IUserRepo {
 export interface IStoreRepo {
   getAll(includeInactive?: boolean): Promise<Store[]>;
   getById(id: string): Promise<Store | null>;
+  getPublicStats(storeId: string): Promise<StorePublicStats>;
   create(store: Partial<Store>): Promise<Store>;
   toggleVip(id: string, isVip: boolean): Promise<void>;
   toggleApproval(id: string, isApproved: boolean): Promise<void>;
@@ -105,9 +108,38 @@ export interface IStoreRepo {
   setPlan(id: string, planType: PlanType, durationDays?: number): Promise<void>;
 }
 
+export interface IStoreFollowerRepo {
+  isFollowing(storeId: string, userId: string): Promise<boolean>;
+  getFollowerCount(storeId: string): Promise<number>;
+  follow(storeId: string, userId: string): Promise<{ following: boolean; count: number }>;
+  unfollow(storeId: string, userId: string): Promise<{ following: boolean; count: number }>;
+  toggle(storeId: string, userId: string): Promise<{ following: boolean; count: number }>;
+}
+
 export interface IStoreReviewRepo {
   getByStore(storeId: string): Promise<StoreReview[]>;
-  create(review: { storeId: string; userId: string; userName?: string; stars: number; comment: string }): Promise<StoreReview>;
+  create(review: {
+    storeId: string;
+    userId: string;
+    userName?: string;
+    userAvatar?: string | null;
+    stars: number;
+    comment: string;
+    photos?: string[];
+  }): Promise<StoreReview>;
+}
+
+export interface IProductReviewRepo {
+  getByProduct(productId: string): Promise<ProductReview[]>;
+  create(review: {
+    productId: string;
+    userId: string;
+    userName?: string;
+    userAvatar?: string | null;
+    stars: number;
+    comment: string;
+    photos?: string[];
+  }): Promise<ProductReview>;
 }
 
 export interface INotificationRepo {

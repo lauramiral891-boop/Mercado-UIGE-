@@ -180,8 +180,9 @@ describe("Regras de Negócio — Lojas, Denúncias, Planos, Uíge e Entregas", (
     expect(after.courierEarning).toBe(1700);
   });
 
-  it("actualiza classificação média da loja após avaliações", async () => {
+  it("actualiza classificação média da loja após avaliações de clientes com encomenda entregue", async () => {
     const storeRepo = new OfflineStoreRepo();
+    const orderRepo = new (await import("../../repositories/offline")).OfflineOrderRepo();
     const reviewRepo = new OfflineStoreReviewRepo();
 
     const st = await storeRepo.create({
@@ -194,6 +195,25 @@ describe("Regras de Negócio — Lojas, Denúncias, Planos, Uíge e Entregas", (
       facadeImage: "f.jpg",
       isApproved: true,
     });
+
+    const ord1 = await orderRepo.create({
+      userId: "c1",
+      storeId: st.id,
+      items: [],
+      address: "Uíge",
+      paymentMethod: "Multicaixa Express",
+      deliveryFee: 0,
+    });
+    const ord2 = await orderRepo.create({
+      userId: "c2",
+      storeId: st.id,
+      items: [],
+      address: "Uíge",
+      paymentMethod: "Multicaixa Express",
+      deliveryFee: 0,
+    });
+    await orderRepo.updateStatus(ord1.id, "Entregue");
+    await orderRepo.updateStatus(ord2.id, "Entregue");
 
     await reviewRepo.create({ storeId: st.id, userId: "c1", stars: 5, comment: "Óptimo" });
     await reviewRepo.create({ storeId: st.id, userId: "c2", stars: 3, comment: "Normal" });

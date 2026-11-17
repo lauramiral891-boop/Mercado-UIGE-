@@ -4,7 +4,9 @@ import {
   SupabaseMessageRepo,
   SupabaseUserRepo,
   SupabaseStoreRepo,
+  SupabaseStoreFollowerRepo,
   SupabaseStoreReviewRepo,
+  SupabaseProductReviewRepo,
   SupabaseNotificationRepo,
   SupabaseReportRepo,
   SupabaseAdRepo,
@@ -24,7 +26,9 @@ export const orderRepo = new SupabaseOrderRepo();
 export const messageRepo = new SupabaseMessageRepo();
 export const userRepo = new SupabaseUserRepo();
 export const storeRepo = new SupabaseStoreRepo();
+export const storeFollowerRepo = new SupabaseStoreFollowerRepo();
 export const storeReviewRepo = new SupabaseStoreReviewRepo();
+export const productReviewRepo = new SupabaseProductReviewRepo();
 export const notificationRepo = new SupabaseNotificationRepo();
 export const reportRepo = new SupabaseReportRepo();
 export const adRepo = new SupabaseAdRepo();

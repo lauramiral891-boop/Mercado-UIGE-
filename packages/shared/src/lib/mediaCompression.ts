@@ -1,12 +1,13 @@
 import { Store, User } from "../types";
+import { BannerImageResult, compressSourceToBanner } from "./imageCompression";
 
 export const MAX_VIDEO_DURATION_SEC = 15;
 export const MAX_PRODUCT_VIDEO_BYTES = 10 * 1024 * 1024; // 10 MB (artigos de comerciantes)
 export const MAX_VIDEO_BYTES = MAX_PRODUCT_VIDEO_BYTES; // Alias para artigos (10 MB)
 
-export const MAX_AD_VIDEO_DURATION_SEC = 30;
-export const MAX_AD_VIDEO_BYTES = 20 * 1024 * 1024; // 20 MB (anúncios do admin)
-export const AD_VIDEO_TARGET_BYTES = 8 * 1024 * 1024; // Alvo ~8 MB após compressão no dispositivo
+export const MAX_AD_VIDEO_DURATION_SEC = 15;
+export const MAX_AD_VIDEO_BYTES = 5 * 1024 * 1024; // 5 MB (banners em vídeo)
+export const AD_VIDEO_TARGET_BYTES = 4 * 1024 * 1024; // Alvo <= 4 MB após compressão no dispositivo
 
 export type PublishActionTarget = "publish" | "want_to_sell" | "login";
 
@@ -282,4 +283,69 @@ export async function compressVideoOnDevice(
     durationSec: Number(durationSec.toFixed(1)),
     sizeMB: Number((finalBlob.size / (1024 * 1024)).toFixed(2)),
   };
+}
+
+/**
+ * Extrai o primeiro frame do vídeo como capa 16:9 (1600x900, WebP/JPEG <= 300 KB).
+ */
+export async function captureVideoFirstFrame(file: File | Blob): Promise<BannerImageResult> {
+  if (typeof document === "undefined" || typeof URL === "undefined") {
+    throw new Error("Extracção de capa indisponível fora do browser.");
+  }
+
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    const objectUrl = URL.createObjectURL(file);
+    video.preload = "auto";
+    video.muted = true;
+    video.playsInline = true;
+
+    const cleanup = () => {
+      URL.revokeObjectURL(objectUrl);
+      video.pause();
+      video.removeAttribute("src");
+    };
+
+    let captured = false;
+    const captureFrame = () => {
+      if (captured) return;
+      captured = true;
+      compressSourceToBanner(
+        video,
+        video.videoWidth || 1600,
+        video.videoHeight || 900
+      )
+        .then((res) => {
+          cleanup();
+          resolve(res);
+        })
+        .catch((err) => {
+          cleanup();
+          reject(err);
+        });
+    };
+
+    video.onloadeddata = () => {
+      if (video.readyState >= 2) {
+        try {
+          video.currentTime = 0.05;
+        } catch {
+          captureFrame();
+        }
+      }
+    };
+
+    video.onseeked = captureFrame;
+
+    video.oncanplay = () => {
+      setTimeout(captureFrame, 120);
+    };
+
+    video.onerror = () => {
+      cleanup();
+      reject(new Error("Não foi possível extrair a imagem de capa do vídeo."));
+    };
+
+    video.src = objectUrl;
+  });
 }

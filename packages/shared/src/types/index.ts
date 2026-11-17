@@ -17,7 +17,7 @@ export type AdPosition = "topo" | "faixa" | "categoria" | "pesquisa" | "ecra_int
 
 export type AdAdvertiserType = "plataforma" | "externo" | "loja";
 
-export type AdDestinationType = "loja" | "produto" | "link" | "whatsapp";
+export type AdDestinationType = "loja" | "produto" | "link" | "whatsapp" | "nenhum";
 
 export type BannerCategory = "publico" | "patrocinado" | "promocional";
 
@@ -92,6 +92,9 @@ export interface Store {
   planExpiresAt?: string | null;
   reportsCount?: number;
   reviewsCount?: number;
+  followersCount?: number;
+  deliveredOrdersCount?: number;
+  productsCount?: number;
   rating: number;
   salesCount: number;
   createdAt: string;
@@ -223,9 +226,40 @@ export interface StoreReview {
   storeId: string;
   userId: string;
   userName?: string;
+  userAvatar?: string | null;
   stars: number;
   comment: string;
+  photos?: string[];
+  verifiedPurchase?: boolean;
   createdAt: string;
+}
+
+export interface ProductReview {
+  id: string;
+  productId: string;
+  userId: string;
+  userName?: string;
+  userAvatar?: string | null;
+  stars: number;
+  comment: string;
+  photos?: string[];
+  verifiedPurchase?: boolean;
+  createdAt: string;
+}
+
+export interface StoreFollower {
+  id: string;
+  storeId: string;
+  userId: string;
+  createdAt: string;
+}
+
+export interface StorePublicStats {
+  productsCount: number;
+  deliveredOrdersCount: number;
+  followersCount: number;
+  rating: number;
+  reviewsCount: number;
 }
 
 export interface SponsoredAd {

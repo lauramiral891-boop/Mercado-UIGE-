@@ -352,17 +352,40 @@ export function computeBannerDashboardStats(ads: SponsoredAd[], nowMs = Date.now
   };
 }
 
+export function hasAdDestination(ad: Partial<SponsoredAd>): boolean {
+  if (!ad) return false;
+  if (ad.destinationType === "nenhum") return false;
+  if (ad.destinationType === "link") {
+    return Boolean((ad.destinationValue || ad.linkUrl || "").trim());
+  }
+  if (ad.destinationType === "whatsapp") {
+    return Boolean((ad.destinationValue || "").trim());
+  }
+  if (ad.destinationType === "produto") {
+    return Boolean((ad.productId || ad.destinationValue || "").trim());
+  }
+  if (ad.destinationType === "loja") {
+    return Boolean((ad.storeId || ad.destinationValue || "").trim());
+  }
+  return Boolean((ad.linkUrl || ad.destinationValue || ad.productId || ad.storeId || "").trim());
+}
+
 /**
  * Valida e normaliza o destino de um anúncio:
+ * - "nenhum": banner apenas informativo, sem ligação clicável
  * - "link": aceita ESTRITAMENTE URLs https:// (rejeita javascript:, data:, http:, vbscript:, etc.)
  * - "whatsapp": normaliza telefone para https://wa.me/<digitos> (rejeita esquemas perigosos)
  * - "loja" / "produto": exige identificador de loja ou artigo
  */
 export function validateSafeAdDestination(
-  destinationType: AdDestinationType = "loja",
+  destinationType: AdDestinationType = "nenhum",
   rawValue?: string | null,
   opts?: { storeId?: string; productId?: string }
 ): { ok: boolean; normalizedValue?: string; error?: string } {
+  if (destinationType === "nenhum") {
+    return { ok: true, normalizedValue: "" };
+  }
+
   const val = (rawValue || "").trim();
 
   if (destinationType === "link") {

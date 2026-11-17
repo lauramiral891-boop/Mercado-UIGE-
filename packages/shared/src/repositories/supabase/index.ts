@@ -8,6 +8,7 @@ import {
   getStoredStores,
 } from "../../lib/storage";
 import { smartSearch, generateDeliveryCode, createCodedError } from "../../lib/utils";
+import { calculateDiscountPercent } from "../../lib/storefront";
 import {
   clampBannerDurationSec,
   isAdEligibleForPublicDisplay,
@@ -27,7 +28,10 @@ import {
   AuditLogItem,
   MessageItem,
   StoreReview,
+  ProductReview,
+  StorePublicStats,
   SponsoredAd,
+  AdDestinationType,
   MerchantPayment,
   DeliveryRecord,
   DeliveryStatus,
@@ -49,7 +53,9 @@ import {
   IMessageRepo,
   IUserRepo,
   IStoreRepo,
+  IStoreFollowerRepo,
   IStoreReviewRepo,
+  IProductReviewRepo,
   INotificationRepo,
   IReportRepo,
   IAdRepo,
@@ -68,7 +74,9 @@ import {
   OfflineMessageRepo,
   OfflineUserRepo,
   OfflineStoreRepo,
+  OfflineStoreFollowerRepo,
   OfflineStoreReviewRepo,
+  OfflineProductReviewRepo,
   OfflineNotificationRepo,
   OfflineReportRepo,
   OfflineAdRepo,
@@ -89,7 +97,9 @@ const fallbackOrderRepo = new OfflineOrderRepo();
 const fallbackMessageRepo = new OfflineMessageRepo();
 const fallbackUserRepo = new OfflineUserRepo();
 const fallbackStoreRepo = new OfflineStoreRepo();
+const fallbackStoreFollowerRepo = new OfflineStoreFollowerRepo();
 const fallbackStoreReviewRepo = new OfflineStoreReviewRepo();
+const fallbackProductReviewRepo = new OfflineProductReviewRepo();
 const fallbackNotificationRepo = new OfflineNotificationRepo();
 const fallbackReportRepo = new OfflineReportRepo();
 const fallbackAdRepo = new OfflineAdRepo();
@@ -110,10 +120,7 @@ function mapProductRow(row: any): Product {
     description: row.descricao,
     price: Number(row.preco),
     oldPrice: row.preco_antigo ? Number(row.preco_antigo) : null,
-    discount:
-      row.preco_antigo && Number(row.preco_antigo) > Number(row.preco)
-        ? Math.round((1 - Number(row.preco) / Number(row.preco_antigo)) * 100)
-        : 0,
+    discount: calculateDiscountPercent(Number(row.preco), row.preco_antigo),
     stock: row.stock,
     categoryName: row.categoria,
     brand: row.marca,
@@ -725,8 +732,10 @@ export class SupabaseStoreRepo implements IStoreRepo {
       planExpiresAt: s.plano_expira_em,
       reportsCount: s.denuncias_count || 0,
       reviewsCount: s.total_avaliacoes || 0,
+      followersCount: Number(s.seguidores_count || 0),
+      deliveredOrdersCount: Number(s.encomendas_entregues_count || 0),
       rating: Number(s.classificacao || 0),
-      salesCount: 0,
+      salesCount: Number(s.encomendas_entregues_count || 0),
       phone: s.telefone,
       createdAt: s.criado_em,
     };
@@ -757,6 +766,23 @@ export class SupabaseStoreRepo implements IStoreRepo {
       return this.mapStoreRow(data);
     } catch {
       return fallbackStoreRepo.getById(id);
+    }
+  }
+
+  async getPublicStats(storeId: string): Promise<StorePublicStats> {
+    if (!isSupabaseConfigured) return fallbackStoreRepo.getPublicStats(storeId);
+    try {
+      const { data, error } = await supabase.rpc("get_store_public_stats", { p_loja_id: storeId });
+      if (error || !data) return fallbackStoreRepo.getPublicStats(storeId);
+      return {
+        productsCount: Number(data.produtos_count || 0),
+        deliveredOrdersCount: Number(data.entregas_count || 0),
+        followersCount: Number(data.seguidores_count || 0),
+        rating: Number(data.classificacao || 0),
+        reviewsCount: Number(data.total_avaliacoes || 0),
+      };
+    } catch {
+      return fallbackStoreRepo.getPublicStats(storeId);
     }
   }
 
@@ -848,14 +874,93 @@ export class SupabaseStoreRepo implements IStoreRepo {
   }
 }
 
-// 5B. SUPABASE AVALIAÇÕES POR LOJA
+// 5B. SUPABASE SEGUIDORES DA LOJA
+export class SupabaseStoreFollowerRepo implements IStoreFollowerRepo {
+  async isFollowing(storeId: string, userId: string): Promise<boolean> {
+    if (!storeId || !userId) return false;
+    if (!isSupabaseConfigured) return fallbackStoreFollowerRepo.isFollowing(storeId, userId);
+    try {
+      const { data, error } = await supabase
+        .from("seguidores_loja")
+        .select("id")
+        .eq("loja_id", storeId)
+        .eq("utilizador_id", userId)
+        .maybeSingle();
+      if (error) return fallbackStoreFollowerRepo.isFollowing(storeId, userId);
+      return Boolean(data);
+    } catch {
+      return fallbackStoreFollowerRepo.isFollowing(storeId, userId);
+    }
+  }
+
+  async getFollowerCount(storeId: string): Promise<number> {
+    if (!storeId) return 0;
+    if (!isSupabaseConfigured) return fallbackStoreFollowerRepo.getFollowerCount(storeId);
+    try {
+      const { count, error } = await supabase
+        .from("seguidores_loja")
+        .select("*", { count: "exact", head: true })
+        .eq("loja_id", storeId);
+      if (error || count === null) return fallbackStoreFollowerRepo.getFollowerCount(storeId);
+      return count;
+    } catch {
+      return fallbackStoreFollowerRepo.getFollowerCount(storeId);
+    }
+  }
+
+  async follow(storeId: string, userId: string): Promise<{ following: boolean; count: number }> {
+    if (!storeId || !userId) {
+      throw new Error("Inicia sessão para seguir esta loja.");
+    }
+    if (!isSupabaseConfigured) return fallbackStoreFollowerRepo.follow(storeId, userId);
+
+    const { error } = await supabase
+      .from("seguidores_loja")
+      .upsert(
+        { loja_id: storeId, utilizador_id: userId },
+        { onConflict: "loja_id,utilizador_id" }
+      );
+    if (error) {
+      throw createCodedError(error.message || "Não foi possível seguir a loja.", error.code);
+    }
+    await fallbackStoreFollowerRepo.follow(storeId, userId).catch(() => {});
+    const count = await this.getFollowerCount(storeId);
+    return { following: true, count };
+  }
+
+  async unfollow(storeId: string, userId: string): Promise<{ following: boolean; count: number }> {
+    if (!storeId || !userId) {
+      throw new Error("Inicia sessão para deixar de seguir esta loja.");
+    }
+    if (!isSupabaseConfigured) return fallbackStoreFollowerRepo.unfollow(storeId, userId);
+
+    const { error } = await supabase
+      .from("seguidores_loja")
+      .delete()
+      .eq("loja_id", storeId)
+      .eq("utilizador_id", userId);
+    if (error) {
+      throw createCodedError(error.message || "Não foi possível deixar de seguir a loja.", error.code);
+    }
+    await fallbackStoreFollowerRepo.unfollow(storeId, userId).catch(() => {});
+    const count = await this.getFollowerCount(storeId);
+    return { following: false, count };
+  }
+
+  async toggle(storeId: string, userId: string): Promise<{ following: boolean; count: number }> {
+    const following = await this.isFollowing(storeId, userId);
+    return following ? this.unfollow(storeId, userId) : this.follow(storeId, userId);
+  }
+}
+
+// 5C. SUPABASE AVALIAÇÕES POR LOJA
 export class SupabaseStoreReviewRepo implements IStoreReviewRepo {
   async getByStore(storeId: string): Promise<StoreReview[]> {
     if (!isSupabaseConfigured) return fallbackStoreReviewRepo.getByStore(storeId);
     try {
       const { data, error } = await supabase
         .from("avaliacoes_loja")
-        .select("*, perfis(nome)")
+        .select("*, perfis(nome, avatar_url)")
         .eq("loja_id", storeId)
         .order("criado_em", { ascending: false });
       if (error || !data) return fallbackStoreReviewRepo.getByStore(storeId);
@@ -864,8 +969,11 @@ export class SupabaseStoreReviewRepo implements IStoreReviewRepo {
         storeId: r.loja_id,
         userId: r.utilizador_id,
         userName: r.perfis?.nome || "Cliente Uíge",
+        userAvatar: r.perfis?.avatar_url || null,
         stars: r.estrelas,
         comment: r.comentario || "",
+        photos: Array.isArray(r.fotos) ? r.fotos : [],
+        verifiedPurchase: Boolean(r.compra_verificada),
         createdAt: r.criado_em,
       }));
     } catch {
@@ -877,38 +985,121 @@ export class SupabaseStoreReviewRepo implements IStoreReviewRepo {
     storeId: string;
     userId: string;
     userName?: string;
+    userAvatar?: string | null;
     stars: number;
     comment: string;
+    photos?: string[];
   }): Promise<StoreReview> {
-    const local = await fallbackStoreReviewRepo.create(review);
-    if (!isSupabaseConfigured) return local;
+    if (!isSupabaseConfigured) return fallbackStoreReviewRepo.create(review);
+    const cleanPhotos = (review.photos || []).filter(Boolean).slice(0, 5);
+    const { data, error } = await supabase
+      .from("avaliacoes_loja")
+      .upsert(
+        {
+          loja_id: review.storeId,
+          utilizador_id: review.userId,
+          estrelas: Math.min(5, Math.max(1, Math.round(review.stars))),
+          comentario: review.comment.trim(),
+          fotos: cleanPhotos,
+        },
+        { onConflict: "utilizador_id,loja_id" }
+      )
+      .select()
+      .single();
+
+    if (error || !data) {
+      throw createCodedError(
+        error?.message || "Apenas clientes com encomenda entregue desta loja podem publicar avaliação.",
+        error?.code
+      );
+    }
+    return {
+      id: data.id,
+      storeId: data.loja_id,
+      userId: data.utilizador_id,
+      userName: review.userName || "Cliente Uíge",
+      userAvatar: review.userAvatar || null,
+      stars: data.estrelas,
+      comment: data.comentario || "",
+      photos: Array.isArray(data.fotos) ? data.fotos : cleanPhotos,
+      verifiedPurchase: Boolean(data.compra_verificada ?? true),
+      createdAt: data.criado_em,
+    };
+  }
+}
+
+// 5D. SUPABASE AVALIAÇÕES POR PRODUTO
+export class SupabaseProductReviewRepo implements IProductReviewRepo {
+  async getByProduct(productId: string): Promise<ProductReview[]> {
+    if (!isSupabaseConfigured) return fallbackProductReviewRepo.getByProduct(productId);
     try {
       const { data, error } = await supabase
-        .from("avaliacoes_loja")
-        .upsert(
-          {
-            loja_id: review.storeId,
-            utilizador_id: review.userId,
-            estrelas: review.stars,
-            comentario: review.comment.trim(),
-          },
-          { onConflict: "utilizador_id,loja_id" }
-        )
-        .select()
-        .single();
-      if (error || !data) return local;
-      return {
-        id: data.id,
-        storeId: data.loja_id,
-        userId: data.utilizador_id,
-        userName: review.userName || "Cliente Uíge",
-        stars: data.estrelas,
-        comment: data.comentario || "",
-        createdAt: data.criado_em,
-      };
+        .from("avaliacoes")
+        .select("*, perfis(nome, avatar_url)")
+        .eq("produto_id", productId)
+        .order("criado_em", { ascending: false });
+      if (error || !data) return fallbackProductReviewRepo.getByProduct(productId);
+      return data.map((r: any) => ({
+        id: r.id,
+        productId: r.produto_id,
+        userId: r.utilizador_id,
+        userName: r.perfis?.nome || "Cliente Uíge",
+        userAvatar: r.perfis?.avatar_url || null,
+        stars: r.estrelas,
+        comment: r.comentario || "",
+        photos: Array.isArray(r.fotos) ? r.fotos : [],
+        verifiedPurchase: Boolean(r.compra_verificada),
+        createdAt: r.criado_em,
+      }));
     } catch {
-      return local;
+      return fallbackProductReviewRepo.getByProduct(productId);
     }
+  }
+
+  async create(review: {
+    productId: string;
+    userId: string;
+    userName?: string;
+    userAvatar?: string | null;
+    stars: number;
+    comment: string;
+    photos?: string[];
+  }): Promise<ProductReview> {
+    if (!isSupabaseConfigured) return fallbackProductReviewRepo.create(review);
+    const cleanPhotos = (review.photos || []).filter(Boolean).slice(0, 5);
+    const { data, error } = await supabase
+      .from("avaliacoes")
+      .upsert(
+        {
+          produto_id: review.productId,
+          utilizador_id: review.userId,
+          estrelas: Math.min(5, Math.max(1, Math.round(review.stars))),
+          comentario: review.comment.trim(),
+          fotos: cleanPhotos,
+        },
+        { onConflict: "utilizador_id,produto_id" }
+      )
+      .select()
+      .single();
+
+    if (error || !data) {
+      throw createCodedError(
+        error?.message || "Apenas clientes com encomenda entregue deste artigo podem publicar avaliação.",
+        error?.code
+      );
+    }
+    return {
+      id: data.id,
+      productId: data.produto_id,
+      userId: data.utilizador_id,
+      userName: review.userName || "Cliente Uíge",
+      userAvatar: review.userAvatar || null,
+      stars: data.estrelas,
+      comment: data.comentario || "",
+      photos: Array.isArray(data.fotos) ? data.fotos : cleanPhotos,
+      verifiedPurchase: Boolean(data.compra_verificada ?? true),
+      createdAt: data.criado_em,
+    };
   }
 }
 
@@ -1128,12 +1319,13 @@ export class SupabaseAdRepo implements IAdRepo {
       storeImage: a.lojas?.foto_fachada_url || a.lojas?.logo_url || undefined,
       productName: a.produtos?.nome || undefined,
       destinationType:
-        a.tipo_destino || (a.produto_id ? "produto" : "loja"),
+        a.tipo_destino ||
+        (a.produto_id ? "produto" : a.loja_id ? "loja" : a.link_destino || a.destino_valor ? "link" : "nenhum"),
       destinationValue: a.destino_valor || a.link_destino || undefined,
-      title: a.titulo,
+      title: (a.titulo || "").trim(),
       subtitle: description,
       description,
-      ctaText: a.texto_botao || "Ver oferta",
+      ctaText: (a.texto_botao || "").trim(),
       linkUrl: a.link_destino || (a.tipo_destino === "link" ? a.destino_valor : undefined),
       order: Number(a.ordem ?? 0),
       bannerCategory,
@@ -1163,7 +1355,11 @@ export class SupabaseAdRepo implements IAdRepo {
   }
 
   private validateAndBuildDestination(ad: Partial<SponsoredAd>) {
-    const destinationType = ad.destinationType || (ad.productId ? "produto" : "loja");
+    const destinationType: AdDestinationType =
+      ad.destinationType || (ad.productId ? "produto" : ad.storeId ? "loja" : ad.linkUrl ? "link" : "nenhum");
+    if (destinationType === "nenhum") {
+      return { destinationType: "nenhum" as const, destinationValue: null };
+    }
     const rawDest = ad.destinationValue || ad.linkUrl;
     if (destinationType === "link" || destinationType === "whatsapp") {
       const check = validateSafeAdDestination(destinationType, rawDest, {
@@ -1254,7 +1450,7 @@ export class SupabaseAdRepo implements IAdRepo {
       loja_id: advertiserType === "loja" ? ad.storeId || null : null,
       vendedor_id: ad.sellerId || null,
       produto_id: destinationType === "produto" ? ad.productId || destinationValue || null : ad.productId || null,
-      titulo: ad.title || "Campanha Patrocinada",
+      titulo: (ad.title || "").trim(),
       subtitulo: description,
       imagem_url: ad.imageUrl || null,
       posicao: ad.position || "topo",
@@ -1282,8 +1478,13 @@ export class SupabaseAdRepo implements IAdRepo {
     const v8Payload = {
       ...v7Payload,
       descricao: description,
-      texto_botao: ad.ctaText?.trim() || "Ver oferta",
-      link_destino: destinationType === "link" ? destinationValue || null : ad.linkUrl?.trim() || null,
+      texto_botao: (ad.ctaText || "").trim() || null,
+      link_destino:
+        destinationType === "link"
+          ? destinationValue || null
+          : destinationType === "nenhum"
+          ? null
+          : ad.linkUrl?.trim() || null,
       ordem: Number(ad.order ?? 0),
       categoria_banner: bannerCategory,
       prioridade: Number(ad.priority ?? 0),
@@ -1302,6 +1503,19 @@ export class SupabaseAdRepo implements IAdRepo {
       .insert(v9Payload)
       .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
       .single();
+
+    if (
+      result.error &&
+      destinationType === "nenhum" &&
+      result.error.code === "23514" &&
+      String(result.error.message || "").includes("tipo_destino")
+    ) {
+      result = await supabase
+        .from("anuncios")
+        .insert({ ...v9Payload, tipo_destino: "loja", destino_valor: null, link_destino: null })
+        .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
+        .single();
+    }
 
     if (result.error && (result.error.code === "42703" || result.error.code === "PGRST204")) {
       result = await supabase
@@ -1374,7 +1588,7 @@ export class SupabaseAdRepo implements IAdRepo {
         destinationType === "produto"
           ? merged.productId || destinationValue || null
           : merged.productId || null,
-      titulo: merged.title,
+      titulo: (merged.title || "").trim(),
       subtitulo: merged.description || merged.subtitle || "",
       imagem_url: merged.imageUrl || null,
       video_url: merged.videoUrl || null,
@@ -1398,10 +1612,12 @@ export class SupabaseAdRepo implements IAdRepo {
     const v8Payload = {
       ...v7Payload,
       descricao: merged.description || merged.subtitle || "",
-      texto_botao: merged.ctaText || "Ver oferta",
+      texto_botao: (merged.ctaText || "").trim() || null,
       link_destino:
         destinationType === "link"
           ? destinationValue || null
+          : destinationType === "nenhum"
+          ? null
           : merged.linkUrl || null,
       ordem: Number(merged.order ?? 0),
       categoria_banner: merged.bannerCategory || "patrocinado",
@@ -1422,6 +1638,20 @@ export class SupabaseAdRepo implements IAdRepo {
       .eq("id", id)
       .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
       .single();
+
+    if (
+      result.error &&
+      destinationType === "nenhum" &&
+      result.error.code === "23514" &&
+      String(result.error.message || "").includes("tipo_destino")
+    ) {
+      result = await supabase
+        .from("anuncios")
+        .update({ ...v9Payload, tipo_destino: "loja", destino_valor: null, link_destino: null })
+        .eq("id", id)
+        .select("*, lojas(nome, plano_tipo, plano_expira_em, is_aprovada, suspensa, foto_fachada_url, logo_url), produtos(nome)")
+        .single();
+    }
 
     if (result.error && (result.error.code === "42703" || result.error.code === "PGRST204")) {
       result = await supabase

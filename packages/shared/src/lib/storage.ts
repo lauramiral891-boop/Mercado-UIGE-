@@ -8,6 +8,8 @@ import {
   ReportItem,
   MessageItem,
   StoreReview,
+  ProductReview,
+  StoreFollower,
   SponsoredAd,
   MerchantPayment,
   DeliveryRecord,
@@ -29,6 +31,8 @@ const STORAGE_KEYS = {
   NOTIFICATIONS: "mu_notifications_v3",
   REPORTS: "mu_reports_v3",
   STORE_REVIEWS: "mu_store_reviews_v1",
+  PRODUCT_REVIEWS: "mu_product_reviews_v1",
+  STORE_FOLLOWERS: "mu_store_followers_v1",
   ADS: "mu_sponsored_ads_v1",
   MERCHANT_PAYMENTS: "mu_merchant_payments_v1",
   DELIVERIES: "mu_deliveries_v1",
@@ -121,6 +125,16 @@ export const saveReports = (reports: ReportItem[]) => setSafe(STORAGE_KEYS.REPOR
 
 export const getStoredStoreReviews = (): StoreReview[] => getSafe<StoreReview[]>(STORAGE_KEYS.STORE_REVIEWS, []);
 export const saveStoreReviews = (reviews: StoreReview[]) => setSafe(STORAGE_KEYS.STORE_REVIEWS, reviews);
+
+export const getStoredProductReviews = (): ProductReview[] =>
+  getSafe<ProductReview[]>(STORAGE_KEYS.PRODUCT_REVIEWS, []);
+export const saveProductReviews = (reviews: ProductReview[]) =>
+  setSafe(STORAGE_KEYS.PRODUCT_REVIEWS, reviews);
+
+export const getStoredStoreFollowers = (): StoreFollower[] =>
+  getSafe<StoreFollower[]>(STORAGE_KEYS.STORE_FOLLOWERS, []);
+export const saveStoreFollowers = (followers: StoreFollower[]) =>
+  setSafe(STORAGE_KEYS.STORE_FOLLOWERS, followers);
 
 export const getStoredAds = (): SponsoredAd[] => getSafe<SponsoredAd[]>(STORAGE_KEYS.ADS, []);
 export const saveAds = (ads: SponsoredAd[]) => setSafe(STORAGE_KEYS.ADS, ads);

@@ -18,6 +18,8 @@ import {
   Truck,
   CheckCircle2,
   Upload,
+  Volume2,
+  VolumeX,
   X,
 } from "lucide-react";
 import {
@@ -38,6 +40,7 @@ import {
   SponsoredAd,
   Store,
   User,
+  captureVideoFirstFrame,
   clampBannerDurationSec,
   compressBannerImage,
   compressImage,
@@ -53,6 +56,7 @@ import {
   formatStoreType,
   formatUserRole,
   getNowLuandaInput,
+  hasAdDestination,
   isBannerPaid,
   isFinanceRole,
   isModeratorRole,
@@ -988,7 +992,7 @@ export const AdsSection: React.FC<{
   );
   const [title, setTitle] = useState("");
   const [subtitle, setSubtitle] = useState("");
-  const [ctaText, setCtaText] = useState("Ver oferta");
+  const [ctaText, setCtaText] = useState("");
   const [bannerCategory, setBannerCategory] = useState<BannerCategory>(
     defaultAdvertiserType === "plataforma" ? "publico" : "patrocinado"
   );
@@ -999,13 +1003,17 @@ export const AdsSection: React.FC<{
   const [storeId, setStoreId] = useState("");
   const [productId, setProductId] = useState("");
   const [destinationType, setDestinationType] = useState<AdDestinationType>(
-    defaultAdvertiserType === "loja" ? "loja" : "link"
+    defaultAdvertiserType === "loja" ? "loja" : "nenhum"
   );
   const [destinationValue, setDestinationValue] = useState("");
   const [position, setPosition] = useState<AdPosition>("topo");
   const [mediaType, setMediaType] = useState<"imagem" | "video">("imagem");
   const [imageUrl, setImageUrl] = useState("");
   const [videoUrl, setVideoUrl] = useState("");
+  const [compressedImageInfo, setCompressedImageInfo] = useState<string | null>(null);
+  const [compressedVideoInfo, setCompressedVideoInfo] = useState<string | null>(null);
+  const [previewMuted, setPreviewMuted] = useState(true);
+  const [previewProgress, setPreviewProgress] = useState(0);
   const [noDates, setNoDates] = useState(false);
   const [startLuanda, setStartLuanda] = useState(() => getNowLuandaInput());
   const [endLuanda, setEndLuanda] = useState(defaultEndLuanda);
@@ -1044,7 +1052,7 @@ export const AdsSection: React.FC<{
 
       if (q) {
         return (
-          a.title.toLowerCase().includes(q) ||
+          (a.title || "").toLowerCase().includes(q) ||
           (a.description || a.subtitle || "").toLowerCase().includes(q) ||
           (a.advertiserName || "").toLowerCase().includes(q) ||
           (a.storeName || "").toLowerCase().includes(q) ||
@@ -1064,7 +1072,7 @@ export const AdsSection: React.FC<{
     setAdvertiserName(defaultAdvertiserType === "plataforma" ? "Mercado Uíge" : "");
     setTitle("");
     setSubtitle("");
-    setCtaText("Ver oferta");
+    setCtaText("");
     setBannerCategory(defaultAdvertiserType === "plataforma" ? "publico" : "patrocinado");
     setOrder("0");
     setPriority("0");
@@ -1072,12 +1080,16 @@ export const AdsSection: React.FC<{
     setIsPaid(defaultAdvertiserType !== "plataforma");
     setStoreId("");
     setProductId("");
-    setDestinationType(defaultAdvertiserType === "loja" ? "loja" : "link");
+    setDestinationType(defaultAdvertiserType === "loja" ? "loja" : "nenhum");
     setDestinationValue("");
     setPosition("topo");
     setMediaType("imagem");
     setImageUrl("");
     setVideoUrl("");
+    setCompressedImageInfo(null);
+    setCompressedVideoInfo(null);
+    setPreviewMuted(true);
+    setPreviewProgress(0);
     setNoDates(false);
     setStartLuanda(getNowLuandaInput());
     setEndLuanda(defaultEndLuanda());
@@ -1097,13 +1109,16 @@ export const AdsSection: React.FC<{
       setStoreId("");
       setBannerCategory("publico");
       setIsPaid(false);
+      if (destinationType === "loja") {
+        setDestinationType("nenhum");
+      }
     } else if (nextType === "externo") {
       setAdvertiserName(advertiserName === "Mercado Uíge" ? "" : advertiserName);
       setStoreId("");
       setBannerCategory("patrocinado");
       setIsPaid(true);
       if (destinationType === "loja") {
-        setDestinationType("link");
+        setDestinationType("nenhum");
       }
     } else {
       setDestinationType("loja");
@@ -1122,7 +1137,7 @@ export const AdsSection: React.FC<{
     );
     setTitle(ad.title || "");
     setSubtitle(ad.description ?? ad.subtitle ?? "");
-    setCtaText(ad.ctaText || "Ver oferta");
+    setCtaText(ad.ctaText || "");
     setBannerCategory(ad.bannerCategory || (type === "plataforma" ? "publico" : "patrocinado"));
     setOrder(String(ad.order ?? 0));
     setPriority(String(ad.priority ?? 0));
@@ -1130,12 +1145,18 @@ export const AdsSection: React.FC<{
     setIsPaid(isBannerPaid(ad));
     setStoreId(ad.storeId || "");
     setProductId(ad.productId || "");
-    setDestinationType(ad.destinationType || (ad.productId ? "produto" : "loja"));
+    setDestinationType(
+      ad.destinationType || (ad.productId ? "produto" : ad.storeId ? "loja" : ad.linkUrl ? "link" : "nenhum")
+    );
     setDestinationValue(ad.destinationValue || ad.linkUrl || ad.storeId || ad.productId || "");
     setPosition(ad.position || "topo");
     setMediaType(ad.mediaType === "video" ? "video" : "imagem");
     setImageUrl(ad.imageUrl || "");
     setVideoUrl(ad.videoUrl || "");
+    setCompressedImageInfo(null);
+    setCompressedVideoInfo(null);
+    setPreviewMuted(true);
+    setPreviewProgress(0);
     setNoDates(!hasDates);
     setStartLuanda(ad.startDate ? utcIsoToLuandaInput(ad.startDate) : getNowLuandaInput());
     setEndLuanda(ad.endDate ? utcIsoToLuandaInput(ad.endDate) : "");
@@ -1156,18 +1177,24 @@ export const AdsSection: React.FC<{
     setMediaError(null);
     setUploadingMedia(true);
     try {
-      const { blob, dataUrl } = await compressBannerImage(file);
+      const { blob, dataUrl, sizeKB, width, height, mimeType } = await compressBannerImage(file);
+      const ext = mimeType === "image/webp" ? "webp" : "jpg";
+      const fmtLabel = mimeType === "image/webp" ? "WebP" : "JPEG";
       if (isSupabaseConfigured && navigator.onLine) {
-        const res = await uploadMediaFile(blob, file.name || `banner_1200x500_${Date.now()}.jpg`, "anuncios");
+        const res = await uploadMediaFile(blob, `banner_${width}x${height}_${Date.now()}.${ext}`, "anuncios");
         if (res.error) throw res.error;
         if (!res.url) throw new Error("O servidor não devolveu o URL público da imagem.");
         setImageUrl(res.url);
       } else {
         setImageUrl(dataUrl);
       }
+      setCompressedImageInfo(`${sizeKB} KB · ${width}×${height} (${fmtLabel})`);
     } catch (err: unknown) {
       setMediaError(
-        extractServerErrorDetail(err, "Falha ao carregar imagem do banner (1200x500). Verifica o ficheiro e a ligação.")
+        extractServerErrorDetail(
+          err,
+          "Falha ao carregar imagem do banner (recomendado 1600x900, 16:9, máx. 300 KB)."
+        )
       );
     } finally {
       setUploadingMedia(false);
@@ -1178,11 +1205,12 @@ export const AdsSection: React.FC<{
     setMediaError(null);
     setUploadingMedia(true);
     try {
-      const { blob, previewUrl } = await compressVideoOnDevice(file, {
+      const { blob, previewUrl, durationSec: dur, sizeMB } = await compressVideoOnDevice(file, {
         maxDurationSec: MAX_AD_VIDEO_DURATION_SEC,
         maxBytes: MAX_AD_VIDEO_BYTES,
         targetBytes: AD_VIDEO_TARGET_BYTES,
       });
+
       if (isSupabaseConfigured && navigator.onLine) {
         const res = await uploadMediaFile(blob, `ad_video_${Date.now()}.webm`, "anuncios");
         if (res.error) throw res.error;
@@ -1191,11 +1219,41 @@ export const AdsSection: React.FC<{
       } else {
         setVideoUrl(previewUrl);
       }
+      setCompressedVideoInfo(`${sizeMB} MB · ${dur}s`);
+
+      // Gerar imagem de capa automática a partir do primeiro frame se ainda não houver capa
+      if (!imageUrl.trim()) {
+        try {
+          const cover = await captureVideoFirstFrame(file);
+          const ext = cover.mimeType === "image/webp" ? "webp" : "jpg";
+          if (isSupabaseConfigured && navigator.onLine) {
+            const coverRes = await uploadMediaFile(
+              cover.blob,
+              `banner_capa_${Date.now()}.${ext}`,
+              "anuncios"
+            );
+            if (!coverRes.error && coverRes.url) {
+              setImageUrl(coverRes.url);
+            } else {
+              setImageUrl(cover.dataUrl);
+            }
+          } else {
+            setImageUrl(cover.dataUrl);
+          }
+          setCompressedImageInfo(`Capa automática: ${cover.sizeKB} KB · ${cover.width}×${cover.height}`);
+        } catch {
+          setMediaError({
+            message:
+              "O vídeo foi carregado, mas não foi possível extrair a capa automática. Carrega uma imagem de capa antes de publicar.",
+            code: null,
+          });
+        }
+      }
     } catch (err: unknown) {
       setMediaError(
         extractServerErrorDetail(
           err,
-          "Falha ao carregar vídeo (máx. 30 s e 20 MB). Verifica o ficheiro e tenta novamente."
+          "Falha ao carregar vídeo (máx. 15 s e 5 MB). Verifica o ficheiro e tenta novamente."
         )
       );
     } finally {
@@ -1225,10 +1283,6 @@ export const AdsSection: React.FC<{
 
   const submitAd = async (desiredStatus: "aprovado" | "rascunho", opts?: { publishNow?: boolean }) => {
     setMediaError(null);
-    if (!title.trim()) {
-      setMediaError({ message: "Indica o título do banner.", code: null });
-      return;
-    }
 
     if (advertiserType === "externo" && !advertiserName.trim()) {
       setMediaError({ message: "Indica o nome do anunciante externo.", code: null });
@@ -1253,7 +1307,16 @@ export const AdsSection: React.FC<{
       advertiserType === "loja" ? storeId : destinationType === "loja" ? storeId : "";
     const effectiveProductId = destinationType === "produto" ? productId : "";
 
-    const destCheck = validateSafeAdDestination(destinationType, destinationValue, {
+    // Link / destino é totalmente opcional quando deixado vazio (salvo se o utilizador introduzir algo inválido)
+    const effectiveDestType: AdDestinationType =
+      destinationType === "nenhum" ||
+      ((destinationType === "link" || destinationType === "whatsapp") && !destinationValue.trim()) ||
+      (destinationType === "loja" && !effectiveStoreId && advertiserType !== "loja") ||
+      (destinationType === "produto" && !effectiveProductId)
+        ? "nenhum"
+        : destinationType;
+
+    const destCheck = validateSafeAdDestination(effectiveDestType, destinationValue, {
       storeId: effectiveStoreId,
       productId: effectiveProductId,
     });
@@ -1262,8 +1325,31 @@ export const AdsSection: React.FC<{
       return;
     }
 
-    if (mediaType === "video" && !videoUrl.trim()) {
-      setMediaError({ message: "Carrega ou cola o link do vídeo promocional.", code: null });
+    const selectedStore = stores.find((s) => s.id === effectiveStoreId);
+    const resolvedImage =
+      imageUrl.trim() ||
+      (advertiserType === "loja" ? selectedStore?.facadeImage || selectedStore?.logo || "" : "");
+
+    if (mediaType === "video") {
+      if (!videoUrl.trim()) {
+        setMediaError({
+          message: "Obrigatório: carrega ou cola um vídeo para o banner (máx. 15 s e 5 MB).",
+          code: null,
+        });
+        return;
+      }
+      if (!resolvedImage) {
+        setMediaError({
+          message: "Banners em vídeo exigem uma imagem de capa (carrega uma imagem 16:9 ou reenvia o vídeo).",
+          code: null,
+        });
+        return;
+      }
+    } else if (!resolvedImage) {
+      setMediaError({
+        message: "Obrigatório: carrega ou cola a imagem do banner (recomendado 1600x900, 16:9).",
+        code: null,
+      });
       return;
     }
 
@@ -1289,11 +1375,6 @@ export const AdsSection: React.FC<{
       return;
     }
 
-    const selectedStore = stores.find((s) => s.id === effectiveStoreId);
-    const resolvedImage =
-      imageUrl.trim() ||
-      (advertiserType === "loja" ? selectedStore?.facadeImage || selectedStore?.logo || "" : "");
-
     const cleanDescription = subtitle.trim();
     const payload: AdminAdFormPayload = {
       advertiserType,
@@ -1306,17 +1387,17 @@ export const AdsSection: React.FC<{
       title: title.trim(),
       subtitle: cleanDescription,
       description: cleanDescription,
-      ctaText: ctaText.trim() || "Ver oferta",
-      linkUrl: destinationType === "link" ? destCheck.normalizedValue || destinationValue.trim() : undefined,
+      ctaText: ctaText.trim(),
+      linkUrl: effectiveDestType === "link" ? destCheck.normalizedValue || destinationValue.trim() : undefined,
       order: Number.isFinite(Number(order)) ? Number(order) : 0,
       priority: Number.isFinite(Number(priority)) ? Number(priority) : 0,
       bannerCategory,
       durationSec: parsedDuration !== null ? clampBannerDurationSec(parsedDuration, defaultBannerDurationSec) : null,
       isPaid,
-      storeId: effectiveStoreId || undefined,
+      storeId: advertiserType === "loja" || effectiveDestType === "loja" ? effectiveStoreId || undefined : undefined,
       productId: effectiveProductId || undefined,
-      destinationType,
-      destinationValue: destCheck.normalizedValue || destinationValue.trim(),
+      destinationType: effectiveDestType,
+      destinationValue: effectiveDestType === "nenhum" ? "" : destCheck.normalizedValue || destinationValue.trim(),
       position,
       mediaType,
       imageUrl: resolvedImage,
@@ -1366,6 +1447,18 @@ export const AdsSection: React.FC<{
     (advertiserType === "loja"
       ? stores.find((s) => s.id === storeId)?.facadeImage || stores.find((s) => s.id === storeId)?.logo || ""
       : "");
+
+  const previewCleanTitle = title.trim();
+  const previewCleanDesc = subtitle.trim();
+  const previewCleanCta = ctaText.trim();
+  const previewHasOverlay = Boolean(previewCleanTitle || previewCleanDesc || previewCleanCta);
+  const previewHasLink = hasAdDestination({
+    destinationType,
+    destinationValue,
+    linkUrl: destinationType === "link" ? destinationValue : undefined,
+    storeId: advertiserType === "loja" || destinationType === "loja" ? storeId : undefined,
+    productId: destinationType === "produto" ? productId : undefined,
+  });
 
   return (
     <div className="space-y-4 anim-fadeUp">
@@ -1424,7 +1517,7 @@ export const AdsSection: React.FC<{
               {editingAdId ? "Editar / Substituir Banner" : "Novo Banner / Publicidade"}
             </h3>
             <p className="text-[11px] text-[#A6B2C5]">
-              Carrega banners (comprimidos em 1200x500), ordena por prioridade e gere campanhas gratuitas ou patrocinadas.
+              Banners em 16:9 (recomendado 1600x900, WebP/JPEG até 300 KB) ou vídeo até 15 s e 5 MB. Título, descrição, botão e link são opcionais.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
@@ -1435,7 +1528,7 @@ export const AdsSection: React.FC<{
                 mediaType === "imagem" ? "bg-[#246BFD] text-white" : "bg-[#111D30] text-[#A6B2C5] border border-[#26354B]"
               }`}
             >
-              <ImageIcon size={13} /> Imagem (1200x500)
+              <ImageIcon size={13} /> Imagem (1600x900)
             </button>
             <button
               type="button"
@@ -1444,7 +1537,7 @@ export const AdsSection: React.FC<{
                 mediaType === "video" ? "bg-[#246BFD] text-white" : "bg-[#111D30] text-[#A6B2C5] border border-[#26354B]"
               }`}
             >
-              <Film size={13} /> Vídeo
+              <Film size={13} /> Vídeo (15s · 5 MB)
             </button>
             {editingAdId && (
               <button
@@ -1484,29 +1577,28 @@ export const AdsSection: React.FC<{
           </div>
         </div>
 
-        {/* 2. Conteúdo do Banner (Título, Descrição, Texto do Botão, Posição) */}
+        {/* 2. Conteúdo do Banner (Todos opcionais: Título, Descrição, Texto do Botão, Posição) */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           <input
             ref={titleInputRef}
             type="text"
-            required
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="Título do banner *"
+            placeholder="Título (opcional)"
             className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
           />
           <input
             type="text"
             value={subtitle}
             onChange={(e) => setSubtitle(e.target.value)}
-            placeholder="Descrição do banner"
+            placeholder="Descrição (opcional)"
             className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
           />
           <input
             type="text"
             value={ctaText}
             onChange={(e) => setCtaText(e.target.value)}
-            placeholder="Texto do botão (ex: Ver oferta)"
+            placeholder="Texto do botão (opcional)"
             className="p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
           />
 
@@ -1633,7 +1725,7 @@ export const AdsSection: React.FC<{
           </div>
 
           <div>
-            <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">Tipo de Destino</label>
+            <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">Tipo de Destino (opcional)</label>
             <select
               aria-label="Tipo de destino do anúncio"
               value={destinationType}
@@ -1643,6 +1735,7 @@ export const AdsSection: React.FC<{
               }}
               className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
             >
+              <option value="nenhum">Sem link (apenas banner)</option>
               <option value="loja">Abrir Loja</option>
               <option value="produto">Abrir Artigo / Produto</option>
               <option value="link">Link Externo (só https://)</option>
@@ -1652,15 +1745,21 @@ export const AdsSection: React.FC<{
 
           <div>
             <label className="block text-[11px] font-bold text-[#A6B2C5] mb-1">
-              {destinationType === "link"
-                ? "URL Externa (https://) *"
+              {destinationType === "nenhum"
+                ? "Destino (opcional)"
+                : destinationType === "link"
+                ? "URL Externa (opcional, https://)"
                 : destinationType === "whatsapp"
-                ? "Número WhatsApp (9 dígitos) *"
+                ? "WhatsApp (opcional, 9 dígitos)"
                 : destinationType === "produto"
-                ? "Artigo de Destino *"
-                : "Loja de Destino *"}
+                ? "Artigo de Destino"
+                : "Loja de Destino"}
             </label>
-            {destinationType === "loja" ? (
+            {destinationType === "nenhum" ? (
+              <div className="p-2.5 rounded-xl bg-[#07111F] border border-[#26354B] text-[#A6B2C5] text-[11px]">
+                Banner sem clique (apenas imagem/vídeo).
+              </div>
+            ) : destinationType === "loja" ? (
               <select
                 value={storeId}
                 onChange={(e) => setStoreId(e.target.value)}
@@ -1680,7 +1779,7 @@ export const AdsSection: React.FC<{
                 className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
               >
                 <option value="">
-                  {approvedProducts.length === 0 ? "Sem artigos disponíveis" : "Selecionar artigo *"}
+                  {approvedProducts.length === 0 ? "Sem artigos disponíveis" : "Selecionar artigo"}
                 </option>
                 {approvedProducts.map((p) => (
                   <option key={p.id} value={p.id}>
@@ -1693,7 +1792,7 @@ export const AdsSection: React.FC<{
                 type="text"
                 value={destinationValue}
                 onChange={(e) => setDestinationValue(e.target.value)}
-                placeholder={destinationType === "link" ? "https://empresa.ao/promo" : "923000000"}
+                placeholder={destinationType === "link" ? "https://empresa.ao/promo (opcional)" : "923000000 (opcional)"}
                 className="w-full p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none focus:border-[#246BFD]"
               />
             )}
@@ -1755,29 +1854,46 @@ export const AdsSection: React.FC<{
           </div>
         </div>
 
-        {/* 5. Mídia (Imagem 1200x500 ou Vídeo) */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-end">
-          <div className="flex gap-2 items-center">
-            <input
-              type="text"
-              value={imageUrl}
-              onChange={(e) => setImageUrl(e.target.value)}
-              placeholder={mediaType === "video" ? "Capa/poster (opcional)" : "URL ou carregar imagem (1200x500)"}
-              className="flex-1 min-w-0 p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
-            />
-            <label className="px-3 py-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-[#B7F34A] font-bold cursor-pointer inline-flex items-center gap-1 shrink-0">
-              <Upload size={13} /> {imageUrl ? "Substituir foto" : "Foto 1200x500"}
+        {/* 5. Mídia (Imagem 1600x900 <= 300 KB ou Vídeo <= 15s / 5 MB com capa) */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-start">
+          <div className="space-y-1">
+            <div className="flex gap-2 items-center">
               <input
-                type="file"
-                accept="image/*"
-                className="hidden"
+                type="text"
+                value={imageUrl}
                 onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) handleUploadAdImage(f);
-                  e.target.value = "";
+                  setImageUrl(e.target.value);
+                  setCompressedImageInfo(null);
                 }}
+                placeholder={
+                  mediaType === "video"
+                    ? "Capa obrigatória (extraída automaticamente ou URL) *"
+                    : "URL ou carregar imagem *"
+                }
+                className="flex-1 min-w-0 p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
               />
-            </label>
+              <label className="px-3 py-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-[#B7F34A] font-bold cursor-pointer inline-flex items-center gap-1 shrink-0">
+                <Upload size={13} /> {imageUrl ? "Substituir foto" : mediaType === "video" ? "Capa 16:9" : "Foto 1600x900"}
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleUploadAdImage(f);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+            </div>
+            <p className="text-[10px] text-[#A6B2C5]">
+              recomendado 1600x900 (16:9) · JPEG ou WebP até 300 KB.
+              {compressedImageInfo && (
+                <span className="ml-1.5 font-bold text-[#B7F34A]">
+                  Tamanho final: {compressedImageInfo}
+                </span>
+              )}
+            </p>
           </div>
 
           {mediaType === "video" && (
@@ -1786,8 +1902,11 @@ export const AdsSection: React.FC<{
                 <input
                   type="text"
                   value={videoUrl}
-                  onChange={(e) => setVideoUrl(e.target.value)}
-                  placeholder="URL do vídeo (ou carrega mp4/webm)"
+                  onChange={(e) => {
+                    setVideoUrl(e.target.value);
+                    setCompressedVideoInfo(null);
+                  }}
+                  placeholder="URL do vídeo (ou carrega mp4/webm) *"
                   className="flex-1 min-w-0 p-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-white outline-none"
                 />
                 <label className="px-3 py-2.5 rounded-xl bg-[#111D30] border border-[#26354B] text-[#B7F34A] font-bold cursor-pointer inline-flex items-center gap-1 shrink-0">
@@ -1805,7 +1924,12 @@ export const AdsSection: React.FC<{
                 </label>
               </div>
               <p className="text-[10px] text-[#A6B2C5]">
-                Vídeo até 30 s e 20 MB (comprimido no dispositivo para ~8 MB).
+                Vídeo até 15 s e 5 MB (comprimido no dispositivo; gera capa automática).
+                {compressedVideoInfo && (
+                  <span className="ml-1.5 font-bold text-[#B7F34A]">
+                    Tamanho final: {compressedVideoInfo}
+                  </span>
+                )}
               </p>
             </div>
           )}
@@ -1868,65 +1992,104 @@ export const AdsSection: React.FC<{
           </div>
         )}
 
-        {/* 7. Pré-visualização ao vivo */}
+        {/* 7. Pré-visualização ao vivo idêntica à app mobile (16:9, máx. 210px) */}
         <div
           data-testid="admin-ad-preview"
-          className="p-3 rounded-xl bg-[#07111F] border border-[#246BFD]/35 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
+          className="p-3 rounded-xl bg-[#07111F] border border-[#246BFD]/35 space-y-2.5"
         >
-          <div className="space-y-1 min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-1.5">
-              {isPaid ? (
-                <span className="px-2 py-0.5 rounded bg-white/15 border border-white/20 text-white font-bold text-[10px]">
-                  Patrocinado
-                </span>
-              ) : (
-                <span className="px-2 py-0.5 rounded bg-[#B7F34A] text-slate-950 font-black text-[10px]">
-                  {formatBannerCategoryLabel(bannerCategory)} (Gratuito)
-                </span>
-              )}
-              <span className="text-[11px] font-bold text-[#A6B2C5]">
-                Pré-visualização · {previewSponsorName} · {formatPositionLabel(position)} ·{" "}
-                {durationSec.trim() ? `${durationSec.trim()}s` : `${defaultBannerDurationSec}s padrão`}
-              </span>
-            </div>
-            <p className="font-black text-sm text-white truncate">
-              {title.trim() || "Título do teu banner"}
-            </p>
-            {subtitle.trim() && (
-              <p className="text-[11px] text-[#A6B2C5] truncate">{subtitle.trim()}</p>
-            )}
-            <span className="inline-block px-2.5 py-1 rounded-lg bg-[#B7F34A] text-slate-950 font-black text-[11px]">
-              {ctaText.trim() || "Ver oferta"}
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#A6B2C5]">
+            <span className="font-bold">
+              Pré-visualização na app · {previewSponsorName} · {formatPositionLabel(position)} ·{" "}
+              {durationSec.trim() ? `${durationSec.trim()}s` : `${defaultBannerDurationSec}s padrão`}
+            </span>
+            <span>
+              {previewHasLink ? "Com link clicável" : "Sem link (não clicável)"}
+              {isPaid ? " · Pago (Patrocinado)" : " · Gratuito"}
             </span>
           </div>
 
-          {(mediaType === "video" ? videoUrl.trim() : previewPoster) && (
-            <div className="w-full sm:w-52 aspect-[12/5] rounded-lg overflow-hidden bg-[#111D30] border border-[#26354B] shrink-0">
-              {mediaType === "video" && videoUrl.trim() ? (
+          <div
+            className={`relative mx-auto w-full max-w-[400px] aspect-[16/9] max-h-[210px] rounded-2xl overflow-hidden bg-[#111D30] border border-[#26354B] ${
+              previewHasLink ? "cursor-pointer" : "cursor-default"
+            }`}
+          >
+            {mediaType === "video" && videoUrl.trim() ? (
+              <>
                 <video
                   src={videoUrl.trim()}
                   poster={previewPoster || undefined}
-                  controls
-                  muted
+                  autoPlay
+                  muted={previewMuted}
+                  loop
                   playsInline
-                  className="w-full h-full object-cover"
+                  onTimeUpdate={(e) => {
+                    const vid = e.currentTarget;
+                    if (vid.duration && Number.isFinite(vid.duration) && vid.duration > 0) {
+                      setPreviewProgress(Math.min(100, Math.max(0, (vid.currentTime / vid.duration) * 100)));
+                    }
+                  }}
+                  className="w-full h-full object-cover object-center"
                 />
-              ) : (
-                <img
-                  src={previewPoster}
-                  alt="Pré-visualização do banner"
-                  className="w-full h-full object-cover"
-                />
-              )}
-            </div>
-          )}
+                <button
+                  type="button"
+                  onClick={() => setPreviewMuted((prev) => !prev)}
+                  aria-label={previewMuted ? "Activar som na pré-visualização" : "Silenciar pré-visualização"}
+                  className="absolute top-2 left-2 z-20 px-2 py-1 rounded-lg bg-black/65 text-white border border-white/20 inline-flex items-center gap-1 text-[10px] font-bold cursor-pointer"
+                >
+                  {previewMuted ? <VolumeX size={13} /> : <Volume2 size={13} className="text-red-500" />}
+                  <span>{previewMuted ? "Sem som" : "Som"}</span>
+                </button>
+                <div className="absolute inset-x-0 bottom-0 h-[3px] bg-white/25 z-20 overflow-hidden">
+                  <div className="h-full bg-red-600" style={{ width: `${previewProgress}%` }} />
+                </div>
+              </>
+            ) : previewPoster ? (
+              <img
+                src={previewPoster}
+                alt={previewCleanTitle || "Pré-visualização do banner"}
+                className="w-full h-full object-cover object-center"
+              />
+            ) : (
+              <div className="w-full h-full grid place-items-center text-[11px] text-[#A6B2C5]">
+                Carrega uma imagem (recomendado 1600x900) ou vídeo (16:9)
+              </div>
+            )}
+
+            {isPaid && (
+              <span className="absolute top-2 right-2 z-20 px-2 py-0.5 rounded bg-black/65 border border-white/20 text-[10px] font-bold text-white">
+                Patrocinado
+              </span>
+            )}
+
+            {previewHasOverlay && (
+              <div className="absolute inset-x-0 bottom-0 z-10 bg-black/65 px-3.5 py-2.5 flex items-end justify-between gap-2.5">
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  {previewCleanTitle && (
+                    <p className="text-[14px] font-bold text-white leading-tight truncate">
+                      {previewCleanTitle}
+                    </p>
+                  )}
+                  {previewCleanDesc && (
+                    <p className="text-[12px] text-white/90 leading-snug line-clamp-1">
+                      {previewCleanDesc}
+                    </p>
+                  )}
+                </div>
+                {previewCleanCta && (
+                  <span className="shrink-0 px-3 py-1 rounded-lg bg-red-600 text-white text-[11px] font-black">
+                    {previewCleanCta}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-[11px] text-[#A6B2C5]">
             {mediaType === "video"
-              ? "Em vídeo: autoplay sem som com controlo de som; em dados móveis exibe só a capa com botão Reproduzir."
-              : "Imagens carregadas são comprimidas automaticamente em 1200x500 px."}
+              ? "Vídeo 16:9: autoplay sem som, em ciclo, pausa fora do ecrã e mostra capa com Reproduzir em dados móveis."
+              : "Imagens comprimidas em 1600x900 (16:9), WebP/JPEG até 300 KB."}
           </span>
           <div className="flex flex-wrap items-center gap-2">
             <button
@@ -2149,12 +2312,14 @@ export const AdsSection: React.FC<{
                             {ad.imageUrl && (
                               <img
                                 src={ad.imageUrl}
-                                alt={ad.title}
-                                className="w-16 h-7 rounded object-cover border border-[#26354B] shrink-0"
+                                alt={(ad.title || "").trim() || "Banner"}
+                                className="w-16 h-9 rounded object-cover object-center border border-[#26354B] shrink-0"
                               />
                             )}
                             <div className="min-w-0">
-                              <span className="font-bold text-white block truncate max-w-[200px]">{ad.title}</span>
+                              <span className="font-bold text-white block truncate max-w-[200px]">
+                                {(ad.title || "").trim() || (ad.mediaType === "video" ? "Banner em vídeo (sem título)" : "Banner só imagem")}
+                              </span>
                               <span className="text-[#A6B2C5] inline-flex items-center gap-1.5">
                                 <span className="px-1.5 py-0.5 rounded bg-[#246BFD]/15 text-blue-200 text-[10px] font-bold">
                                   {formatAdvertiserLabel(ad)}
@@ -2294,7 +2459,9 @@ export const AdsSection: React.FC<{
                 <div key={ad.id} className="p-4 rounded-2xl bg-[#172338] border border-[#26354B] space-y-2 text-xs">
                   <div className="flex items-start justify-between gap-2">
                     <div>
-                      <span className="font-bold text-white block">{ad.title}</span>
+                      <span className="font-bold text-white block">
+                        {(ad.title || "").trim() || (ad.mediaType === "video" ? "Banner em vídeo (sem título)" : "Banner só imagem")}
+                      </span>
                       <span className="text-[#A6B2C5]">
                         #{ad.order ?? 0} · {isBannerPaid(ad) ? "Pago" : "Gratuito"} ·{" "}
                         {ad.advertiserName || ad.storeName || "Mercado Uíge"} · {formatPositionLabel(ad.position)}

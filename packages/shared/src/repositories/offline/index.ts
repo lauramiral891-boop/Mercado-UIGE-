@@ -8,6 +8,9 @@ import {
   MessageItem,
   AuditLogItem,
   StoreReview,
+  ProductReview,
+  StoreFollower,
+  StorePublicStats,
   SponsoredAd,
   MerchantPayment,
   DeliveryRecord,
@@ -32,7 +35,9 @@ import {
   IMessageRepo,
   IUserRepo,
   IStoreRepo,
+  IStoreFollowerRepo,
   IStoreReviewRepo,
+  IProductReviewRepo,
   INotificationRepo,
   IReportRepo,
   IAdRepo,
@@ -64,6 +69,10 @@ import {
   saveReports,
   getStoredStoreReviews,
   saveStoreReviews,
+  getStoredProductReviews,
+  saveProductReviews,
+  getStoredStoreFollowers,
+  saveStoreFollowers,
   getStoredAds,
   saveAds,
   getStoredMerchantPayments,
@@ -82,6 +91,12 @@ import {
   saveAppErrors,
 } from "../../lib/storage";
 import { smartSearch, generateOrderCode, generateDeliveryCode } from "../../lib/utils";
+import {
+  calculateDiscountPercent,
+  canUserReviewProduct,
+  canUserReviewStore,
+  filterStoreProducts,
+} from "../../lib/storefront";
 import { allowTelemetryWrite, sanitizeTelemetryText } from "../../lib/observability";
 import {
   clampBannerDurationSec,
@@ -322,10 +337,7 @@ export class OfflineProductRepo implements IProductRepo {
       description: product.description || "",
       price: Number(product.price || 0),
       oldPrice: product.oldPrice ? Number(product.oldPrice) : null,
-      discount:
-        product.oldPrice && Number(product.oldPrice) > Number(product.price || 0)
-          ? Math.round((1 - Number(product.price || 0) / Number(product.oldPrice)) * 100)
-          : product.discount || 0,
+      discount: calculateDiscountPercent(Number(product.price || 0), product.oldPrice),
       stock: Number(product.stock ?? 1),
       categoryName: product.categoryName || "Electrónicos",
       condition: product.condition || "novo",
@@ -702,6 +714,28 @@ export class OfflineStoreRepo implements IStoreRepo {
     return list.find((s) => s.id === id) || null;
   }
 
+  async getPublicStats(storeId: string): Promise<StorePublicStats> {
+    const products = filterStoreProducts(getStoredProducts(), storeId);
+    const deliveredOrdersCount = getStoredOrders().filter(
+      (o) => o.storeId === storeId && o.status === "Entregue"
+    ).length;
+    const followersCount = getStoredStoreFollowers().filter((f) => f.storeId === storeId).length;
+    const reviews = getStoredStoreReviews().filter((r) => r.storeId === storeId);
+    const reviewsCount = reviews.length;
+    const rating =
+      reviewsCount > 0
+        ? Number((reviews.reduce((sum, r) => sum + Number(r.stars || 0), 0) / reviewsCount).toFixed(1))
+        : 0;
+
+    return {
+      productsCount: products.length,
+      deliveredOrdersCount,
+      followersCount,
+      rating,
+      reviewsCount,
+    };
+  }
+
   async create(store: Partial<Store>): Promise<Store> {
     const existing = getStoredStores();
     const storeType = store.storeType || "loja_fixa";
@@ -793,7 +827,67 @@ export class OfflineStoreRepo implements IStoreRepo {
   }
 }
 
-// 5B. AVALIAÇÕES POR LOJA
+// 5B. SEGUIDORES DE LOJA (Offline com unicidade loja + utilizador)
+export class OfflineStoreFollowerRepo implements IStoreFollowerRepo {
+  async isFollowing(storeId: string, userId: string): Promise<boolean> {
+    if (!storeId || !userId) return false;
+    return getStoredStoreFollowers().some((f) => f.storeId === storeId && f.userId === userId);
+  }
+
+  async getFollowerCount(storeId: string): Promise<number> {
+    if (!storeId) return 0;
+    return getStoredStoreFollowers().filter((f) => f.storeId === storeId).length;
+  }
+
+  async follow(storeId: string, userId: string): Promise<{ following: boolean; count: number }> {
+    if (!storeId || !userId) {
+      throw new Error("Inicia sessão para seguir esta loja.");
+    }
+    const existing = getStoredStoreFollowers();
+    const already = existing.some((f) => f.storeId === storeId && f.userId === userId);
+    const next: StoreFollower[] = already
+      ? existing
+      : [
+          ...existing,
+          {
+            id: `follow_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            storeId,
+            userId,
+            createdAt: new Date().toISOString(),
+          },
+        ];
+    if (!already) {
+      saveStoreFollowers(next);
+    }
+    const count = next.filter((f) => f.storeId === storeId).length;
+    saveStores(
+      getStoredStores().map((st) => (st.id === storeId ? { ...st, followersCount: count } : st))
+    );
+    return { following: true, count };
+  }
+
+  async unfollow(storeId: string, userId: string): Promise<{ following: boolean; count: number }> {
+    if (!storeId || !userId) {
+      throw new Error("Inicia sessão para deixar de seguir esta loja.");
+    }
+    const next = getStoredStoreFollowers().filter(
+      (f) => !(f.storeId === storeId && f.userId === userId)
+    );
+    saveStoreFollowers(next);
+    const count = next.filter((f) => f.storeId === storeId).length;
+    saveStores(
+      getStoredStores().map((st) => (st.id === storeId ? { ...st, followersCount: count } : st))
+    );
+    return { following: false, count };
+  }
+
+  async toggle(storeId: string, userId: string): Promise<{ following: boolean; count: number }> {
+    const currently = await this.isFollowing(storeId, userId);
+    return currently ? this.unfollow(storeId, userId) : this.follow(storeId, userId);
+  }
+}
+
+// 5C. AVALIAÇÕES POR LOJA (Apenas clientes com encomenda entregue)
 export class OfflineStoreReviewRepo implements IStoreReviewRepo {
   async getByStore(storeId: string): Promise<StoreReview[]> {
     return getStoredStoreReviews()
@@ -805,19 +899,31 @@ export class OfflineStoreReviewRepo implements IStoreReviewRepo {
     storeId: string;
     userId: string;
     userName?: string;
+    userAvatar?: string | null;
     stars: number;
     comment: string;
+    photos?: string[];
   }): Promise<StoreReview> {
+    const orders = getStoredOrders();
+    const products = getStoredProducts();
+    if (!canUserReviewStore(review.userId, review.storeId, orders, products)) {
+      throw new Error("Apenas clientes com encomenda entregue desta loja podem avaliar.");
+    }
+
+    const cleanPhotos = (review.photos || []).filter(Boolean).slice(0, 5);
     const existing = getStoredStoreReviews().filter(
       (r) => !(r.storeId === review.storeId && r.userId === review.userId)
     );
     const created: StoreReview = {
-      id: `rev_${Date.now()}`,
+      id: `rev_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       storeId: review.storeId,
       userId: review.userId,
       userName: review.userName || "Cliente Uíge",
+      userAvatar: review.userAvatar || null,
       stars: Math.min(5, Math.max(1, Math.round(review.stars))),
       comment: review.comment.trim(),
+      photos: cleanPhotos,
+      verifiedPurchase: true,
       createdAt: new Date().toISOString(),
     };
     const next = [created, ...existing];
@@ -830,6 +936,60 @@ export class OfflineStoreReviewRepo implements IStoreReviewRepo {
         st.id === review.storeId
           ? { ...st, rating: Number(avg.toFixed(1)), reviewsCount: storeReviews.length }
           : st
+      )
+    );
+    return created;
+  }
+}
+
+// 5D. AVALIAÇÕES POR PRODUTO (Apenas clientes com encomenda entregue)
+export class OfflineProductReviewRepo implements IProductReviewRepo {
+  async getByProduct(productId: string): Promise<ProductReview[]> {
+    return getStoredProductReviews()
+      .filter((r) => r.productId === productId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  async create(review: {
+    productId: string;
+    userId: string;
+    userName?: string;
+    userAvatar?: string | null;
+    stars: number;
+    comment: string;
+    photos?: string[];
+  }): Promise<ProductReview> {
+    const orders = getStoredOrders();
+    if (!canUserReviewProduct(review.userId, review.productId, orders)) {
+      throw new Error("Apenas clientes com encomenda entregue deste artigo podem avaliar.");
+    }
+
+    const cleanPhotos = (review.photos || []).filter(Boolean).slice(0, 5);
+    const existing = getStoredProductReviews().filter(
+      (r) => !(r.productId === review.productId && r.userId === review.userId)
+    );
+    const created: ProductReview = {
+      id: `prev_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      productId: review.productId,
+      userId: review.userId,
+      userName: review.userName || "Cliente Uíge",
+      userAvatar: review.userAvatar || null,
+      stars: Math.min(5, Math.max(1, Math.round(review.stars))),
+      comment: review.comment.trim(),
+      photos: cleanPhotos,
+      verifiedPurchase: true,
+      createdAt: new Date().toISOString(),
+    };
+    const next = [created, ...existing];
+    saveProductReviews(next);
+
+    const productReviews = next.filter((r) => r.productId === review.productId);
+    const avg = productReviews.reduce((s, r) => s + r.stars, 0) / productReviews.length;
+    saveProducts(
+      getStoredProducts().map((p) =>
+        p.id === review.productId
+          ? { ...p, rating: Number(avg.toFixed(1)), reviewsCount: productReviews.length }
+          : p
       )
     );
     return created;
@@ -931,7 +1091,12 @@ export class OfflineAdRepo implements IAdRepo {
     destinationValue?: string;
   } {
     const destinationType: AdDestinationType =
-      ad.destinationType || (ad.productId ? "produto" : ad.storeId ? "loja" : "loja");
+      ad.destinationType ||
+      (ad.productId ? "produto" : ad.storeId ? "loja" : ad.linkUrl ? "link" : "nenhum");
+
+    if (destinationType === "nenhum") {
+      return { destinationType: "nenhum", destinationValue: "" };
+    }
 
     if (destinationType === "link" || destinationType === "whatsapp") {
       const check = validateSafeAdDestination(destinationType, ad.destinationValue, {
@@ -960,18 +1125,27 @@ export class OfflineAdRepo implements IAdRepo {
       const expired = ad.active && Boolean(ad.endDate) && Number.isFinite(endMs) && endMs < now;
       const advertiserType: AdAdvertiserType = resolveAdAdvertiserType(ad);
       const isSuspended = Boolean(ad.isSuspended) || ad.status === "suspenso";
+      const resolvedDestType: AdDestinationType =
+        ad.destinationType ||
+        (ad.productId
+          ? ("produto" as const)
+          : ad.storeId
+          ? ("loja" as const)
+          : ad.linkUrl
+          ? ("link" as const)
+          : ("nenhum" as const));
       return {
         ...ad,
         advertiserType,
         advertiserName:
           ad.advertiserName ||
           (advertiserType === "plataforma" ? "Mercado Uíge" : store?.name || undefined),
-        destinationType:
-          ad.destinationType || (ad.productId ? ("produto" as const) : ("loja" as const)),
+        destinationType: resolvedDestType,
         mediaType: ad.mediaType || (ad.videoUrl ? ("video" as const) : ("imagem" as const)),
+        title: (ad.title || "").trim(),
         description: ad.description ?? ad.subtitle ?? "",
         subtitle: ad.subtitle ?? ad.description ?? "",
-        ctaText: ad.ctaText || "Ver oferta",
+        ctaText: (ad.ctaText || "").trim(),
         linkUrl: ad.linkUrl || (ad.destinationType === "link" ? ad.destinationValue : undefined),
         order: Number(ad.order ?? 0),
         priority: Number(ad.priority ?? 0),
@@ -1094,10 +1268,10 @@ export class OfflineAdRepo implements IAdRepo {
       linkUrl: destinationType === "link" ? destinationValue : ad.linkUrl?.trim() || undefined,
       paymentAmountKz: ad.paymentAmountKz,
       paymentProofUrl: ad.paymentProofUrl,
-      title: ad.title || "Campanha Patrocinada",
+      title: (ad.title || "").trim(),
       subtitle: description,
       description,
-      ctaText: ad.ctaText?.trim() || "Ver oferta",
+      ctaText: (ad.ctaText || "").trim(),
       order: Number(ad.order ?? 0),
       bannerCategory,
       priority: Number(ad.priority ?? 0),
@@ -1205,7 +1379,7 @@ export class OfflineAdRepo implements IAdRepo {
       linkUrl: destinationType === "link" ? destinationValue : merged.linkUrl,
       subtitle: description,
       description,
-      ctaText: merged.ctaText?.trim() || "Ver oferta",
+      ctaText: (merged.ctaText || "").trim(),
       order: Number(merged.order ?? 0),
       priority: Number(merged.priority ?? 0),
       bannerCategory:

@@ -2,6 +2,9 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
   SponsoredAd,
   Store,
+  BANNER_TARGET_WIDTH,
+  BANNER_TARGET_HEIGHT,
+  MAX_BANNER_IMAGE_BYTES,
   FULLSCREEN_AD_INITIAL_DELAY_MS,
   FULLSCREEN_AD_COOLDOWN_MS,
   MAX_AD_VIDEO_DURATION_SEC,
@@ -31,6 +34,7 @@ import {
   uploadMediaFile,
   storeHasActivePaidPlan,
   isAdEligibleForPublicDisplay,
+  hasAdDestination,
   validateSafeAdDestination,
   isCellularConnection,
   canShowFullscreenAd,
@@ -282,39 +286,43 @@ describe("Anúncios em imagem ou vídeo, dados móveis e regras de ecrã inteiro
     expect(extPayment.advertiserName).toBe("Banco Sol Uíge");
   });
 
-  it("valida limites de vídeo (20 MB / 30 s para anúncios com alvo ~8 MB; 10 MB / 15 s para artigos) e limite de 20 MB no Storage", async () => {
+  it("valida limites de banner (1600x900 máx 300KB; vídeo 15 s / 5 MB) e limite de 20 MB no Storage", async () => {
+    expect(BANNER_TARGET_WIDTH).toBe(1600);
+    expect(BANNER_TARGET_HEIGHT).toBe(900);
+    expect(MAX_BANNER_IMAGE_BYTES).toBe(300 * 1024);
+
     expect(MAX_PRODUCT_VIDEO_BYTES).toBe(10 * 1024 * 1024);
-    expect(MAX_AD_VIDEO_BYTES).toBe(20 * 1024 * 1024);
-    expect(AD_VIDEO_TARGET_BYTES).toBe(8 * 1024 * 1024);
-    expect(MAX_AD_VIDEO_DURATION_SEC).toBe(30);
+    expect(MAX_AD_VIDEO_BYTES).toBe(5 * 1024 * 1024);
+    expect(AD_VIDEO_TARGET_BYTES).toBe(4 * 1024 * 1024);
+    expect(MAX_AD_VIDEO_DURATION_SEC).toBe(15);
     expect(MAX_STORAGE_UPLOAD_BYTES).toBe(20 * 1024 * 1024);
 
-    // Anúncio do admin: aceita até 30 s e 20 MB
+    // Banner em vídeo: aceita até 15 s e 5 MB
     expect(
-      validateVideoConstraints(30, 20 * 1024 * 1024, {
+      validateVideoConstraints(15, 5 * 1024 * 1024, {
         maxDurationSec: MAX_AD_VIDEO_DURATION_SEC,
         maxBytes: MAX_AD_VIDEO_BYTES,
       })
     ).toEqual({ ok: true });
 
-    const adTooLong = validateVideoConstraints(31, 5 * 1024 * 1024, {
+    const adTooLong = validateVideoConstraints(16, 2 * 1024 * 1024, {
       maxDurationSec: MAX_AD_VIDEO_DURATION_SEC,
       maxBytes: MAX_AD_VIDEO_BYTES,
     });
     expect(adTooLong.ok).toBe(false);
-    expect(adTooLong.error).toContain("30 segundos");
+    expect(adTooLong.error).toContain("15 segundos");
 
-    const adTooHeavy = validateVideoConstraints(25, MAX_AD_VIDEO_BYTES + 1, {
+    const adTooHeavy = validateVideoConstraints(12, MAX_AD_VIDEO_BYTES + 1, {
       maxDurationSec: MAX_AD_VIDEO_DURATION_SEC,
       maxBytes: MAX_AD_VIDEO_BYTES,
     });
     expect(adTooHeavy.ok).toBe(false);
-    expect(adTooHeavy.error).toContain("20 MB");
+    expect(adTooHeavy.error).toContain("5 MB");
 
-    // Bitrate alvo mantém vídeo de 30s abaixo de ~8 MB
-    const bps30 = computeTargetVideoBitrate(30, AD_VIDEO_TARGET_BYTES);
-    const estimatedBytes30 = (bps30 * 30) / 8;
-    expect(estimatedBytes30).toBeLessThanOrEqual(AD_VIDEO_TARGET_BYTES);
+    // Bitrate alvo mantém vídeo de 15s abaixo de 4 MB
+    const bps15 = computeTargetVideoBitrate(15, AD_VIDEO_TARGET_BYTES);
+    const estimatedBytes15 = (bps15 * 15) / 8;
+    expect(estimatedBytes15).toBeLessThanOrEqual(AD_VIDEO_TARGET_BYTES);
 
     // Upload para Storage bloqueia ficheiros > 20 MB antes de enviar
     const oversizedBlob = new Blob([new Uint8Array(10)], { type: "video/mp4" });
@@ -322,6 +330,59 @@ describe("Anúncios em imagem ou vídeo, dados móveis e regras de ecrã inteiro
     const uploadRes = await uploadMediaFile(oversizedBlob, "grande.mp4", "anuncios");
     expect(uploadRes.url).toBeNull();
     expect(uploadRes.error?.message).toContain("20 MB");
+  });
+
+  it("permite banners só com imagem ou vídeo sem título, descrição, botão nem link (nenhum texto forçado)", async () => {
+    saveStores([]);
+    saveAds([]);
+    const repo = new OfflineAdRepo();
+
+    expect(validateSafeAdDestination("nenhum", "")).toEqual({ ok: true, normalizedValue: "" });
+
+    const imageOnly = await repo.create({
+      advertiserType: "plataforma",
+      bannerCategory: "publico",
+      isPaid: false,
+      title: "",
+      description: "",
+      ctaText: "",
+      destinationType: "nenhum",
+      destinationValue: "",
+      imageUrl: "https://cdn.example.com/banner-16x9.webp",
+      position: "topo",
+      startDate: null,
+      endDate: null,
+      active: true,
+      status: "aprovado",
+    });
+
+    expect(imageOnly.title).toBe("");
+    expect(imageOnly.description).toBe("");
+    expect(imageOnly.ctaText).toBe("");
+    expect(imageOnly.destinationType).toBe("nenhum");
+    expect(hasAdDestination(imageOnly)).toBe(false);
+    expect(isAdEligibleForPublicDisplay(imageOnly, [])).toBe(true);
+
+    const linkedBanner = await repo.create({
+      advertiserType: "externo",
+      advertiserName: "Loja Parceira",
+      bannerCategory: "patrocinado",
+      isPaid: true,
+      title: "Promoção Especial",
+      destinationType: "link",
+      destinationValue: "https://empresa.ao",
+      imageUrl: "https://cdn.example.com/promo.webp",
+      position: "topo",
+      startDate: null,
+      endDate: null,
+      active: true,
+      status: "aprovado",
+    });
+    expect(hasAdDestination(linkedBanner)).toBe(true);
+    expect(linkedBanner.ctaText).toBe("");
+
+    const allPublic = await repo.getAll(false);
+    expect(allPublic).toHaveLength(2);
   });
 
   it("aplica duração por banner vs padrão global (3..60s), ordenação por prioridade/ordem, CTR e suspensão (FASE A)", async () => {
