@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(:not(.light), :not(.light) *));
 
 :root {
   /* Default Dark Mode (Mercado Uíge Signature Theme) */
@@ -24,6 +25,17 @@
   --shadow-card: 0 8px 30px rgba(0, 0, 0, 0.45);
   --shadow-glow: 0 0 25px rgba(36, 107, 253, 0.35);
   --shadow-accent-glow: 0 0 20px rgba(183, 243, 74, 0.25);
+
+  /* Paleta Vermelho, Preto e Branco (Modo Escuro) */
+  --rbw-bg: #09090B;
+  --rbw-surface: #121215;
+  --rbw-surface-2: #18181C;
+  --rbw-border: #27272A;
+  --rbw-text: #FAFAFA;
+  --rbw-muted: #A1A1AA;
+  --rbw-red: #DC2626;
+  --rbw-red-hover: #EF4444;
+  --rbw-red-soft: rgba(220, 38, 38, 0.16);
 }
 
 html.light, body.light {
@@ -50,6 +62,17 @@ html.light, body.light {
   --shadow-card: 0 4px 20px rgba(15, 23, 42, 0.08);
   --shadow-glow: 0 0 20px rgba(36, 107, 253, 0.2);
   --shadow-accent-glow: 0 0 15px rgba(120, 169, 0, 0.15);
+
+  /* Paleta Vermelho, Preto e Branco (Modo Claro) */
+  --rbw-bg: #FAFAFA;
+  --rbw-surface: #FFFFFF;
+  --rbw-surface-2: #F4F4F5;
+  --rbw-border: #E4E4E7;
+  --rbw-text: #09090B;
+  --rbw-muted: #52525B;
+  --rbw-red: #DC2626;
+  --rbw-red-hover: #B91C1C;
+  --rbw-red-soft: rgba(220, 38, 38, 0.08);
 }
 
 html {

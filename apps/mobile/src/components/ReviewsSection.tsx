@@ -11,6 +11,8 @@ import {
   computeReviewStats,
   filterReviews,
   fmtDate,
+  isSupabaseConfigured,
+  translateErrorMessage,
   uploadMediaFile,
 } from "@mercado-uige/shared";
 import { ImageGalleryModal } from "./ImageGalleryModal";
@@ -72,15 +74,28 @@ export const ReviewsSection: React.FC<ReviewsSectionProps> = ({
       const additions: { previewUrl: string; uploadedUrl: string }[] = [];
       for (const f of files.slice(0, remaining)) {
         const compressed = await compressImage(f);
-        const { url } = await uploadMediaFile(compressed.blob, f.name || "avaliacao.jpg", "produtos");
+        let uploadedUrl = compressed.dataUrl;
+        if (isSupabaseConfigured && typeof navigator !== "undefined" && navigator.onLine) {
+          const { url, error } = await uploadMediaFile(
+            compressed.blob,
+            f.name || "avaliacao.jpg",
+            "produtos"
+          );
+          if (error || !url) {
+            throw error || new Error("Não foi possível enviar a fotografia da avaliação.");
+          }
+          uploadedUrl = url;
+        }
         additions.push({
           previewUrl: compressed.dataUrl,
-          uploadedUrl: url || compressed.dataUrl,
+          uploadedUrl,
         });
       }
       setPendingPhotos((prev) => [...prev, ...additions].slice(0, 3));
-    } catch {
-      setFormError("Não foi possível processar a fotografia seleccionada.");
+    } catch (err: unknown) {
+      setFormError(
+        translateErrorMessage(err, "Não foi possível carregar a fotografia seleccionada.")
+      );
     } finally {
       setUploadingPhoto(false);
     }

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { SyncQueue, OfflineOrderRepo, OfflineMessageRepo } from "../offline";
+import { SyncQueue, OfflineOrderRepo, OfflineMessageRepo, OfflineStoreRepo, syncQueue } from "../offline";
 
 // Mock localStorage in memory for tests
 const storageMock = (() => {
@@ -148,5 +148,88 @@ describe("SyncQueue & Offline-First Repository Suite", () => {
     const pending = queue.getQueue();
     expect(pending.length).toBe(1);
     expect(pending[0].retries).toBe(1);
+  });
+
+  it("7. Criar loja duas vezes seguidas (mesmo clientMutationId ou mesmo dono) resulta numa só loja e 1 item na fila", async () => {
+    const storeRepo = new OfflineStoreRepo();
+
+    const first = await storeRepo.create({
+      ownerId: "user_loja_1",
+      name: "Comercial Centro Uíge",
+      storeType: "loja_fixa",
+      municipality: "Uíge",
+      bairro: "Centro da Cidade",
+      address: "Rua do Comércio, 10",
+      facadeImage: "fachada.jpg",
+      clientMutationId: "mut_loja_unica_1",
+    });
+
+    // Segunda chamada seguida com o mesmo clientMutationId
+    const secondSameMutation = await storeRepo.create({
+      ownerId: "user_loja_1",
+      name: "Comercial Centro Uíge",
+      storeType: "loja_fixa",
+      municipality: "Uíge",
+      bairro: "Centro da Cidade",
+      address: "Rua do Comércio, 10",
+      facadeImage: "fachada.jpg",
+      clientMutationId: "mut_loja_unica_1",
+    });
+
+    // Terceira chamada seguida pelo mesmo utilizador sem repetir mutationId
+    const thirdSameOwner = await storeRepo.create({
+      ownerId: "user_loja_1",
+      name: "Outra Tentativa Duplicada",
+      storeType: "loja_fixa",
+      municipality: "Uíge",
+      bairro: "Catapa",
+      address: "Rua 2",
+      facadeImage: "fachada2.jpg",
+      clientMutationId: "mut_loja_unica_2",
+    });
+
+    const allStores = await storeRepo.getAll(true);
+    expect(allStores.length).toBe(1);
+    expect(secondSameMutation.id).toBe(first.id);
+    expect(thirdSameOwner.id).toBe(first.id);
+    expect(first.clientMutationId).toBe("mut_loja_unica_1");
+
+    const queued = syncQueue.getQueue().filter((a) => a.type === "CREATE_STORE");
+    expect(queued.length).toBe(1);
+    expect(queued[0].clientMutationId).toBe("mut_loja_unica_1");
+
+    // Simular repetição da fila online várias vezes seguidas: servidor só recebe 1 criação
+    const createStoreSpy = vi.fn().mockResolvedValue({ id: first.id });
+    await syncQueue.flush({ createStore: createStoreSpy });
+    syncQueue.enqueue("CREATE_STORE", first, "mut_loja_unica_1");
+    await syncQueue.flush({ createStore: createStoreSpy });
+
+    expect(createStoreSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("8. Fila offline deduplica CREATE_STORE por clientMutationId e pára de repetir quando servidor responde 'já existe'", async () => {
+    const queue = new SyncQueue("test_store_queue", "test_store_processed");
+    const mutationId = "store_mut_dup_1";
+
+    queue.enqueue("CREATE_STORE", { ownerId: "u_dup", name: "Loja Alfa" }, mutationId);
+    queue.enqueue("CREATE_STORE", { ownerId: "u_dup", name: "Loja Alfa" }, mutationId);
+    expect(queue.getQueue().length).toBe(1);
+
+    const serverAlreadyExistsSpy = vi.fn().mockRejectedValue({
+      code: "23505",
+      message: "Já existe uma loja registada para esta conta.",
+    });
+
+    const firstFlush = await queue.flush({ createStore: serverAlreadyExistsSpy });
+    expect(firstFlush.failed).toBe(0);
+    expect(firstFlush.processed).toBe(1);
+    expect(queue.getQueue().length).toBe(0);
+    expect(queue.getProcessedMutationIds().has(mutationId)).toBe(true);
+
+    // Nova tentativa de enfileirar ou dar flush não volta a chamar o servidor
+    queue.enqueue("CREATE_STORE", { ownerId: "u_dup", name: "Loja Alfa" }, mutationId);
+    expect(queue.getQueue().length).toBe(0);
+    await queue.flush({ createStore: serverAlreadyExistsSpy });
+    expect(serverAlreadyExistsSpy).toHaveBeenCalledTimes(1);
   });
 });

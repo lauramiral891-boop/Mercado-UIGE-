@@ -100,6 +100,7 @@ export interface Store {
   createdAt: string;
   phone?: string;
   verified?: boolean;
+  clientMutationId?: string;
 }
 
 export interface Product {

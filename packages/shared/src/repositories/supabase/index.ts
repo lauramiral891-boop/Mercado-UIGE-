@@ -7,7 +7,12 @@ import {
   saveAds,
   getStoredStores,
 } from "../../lib/storage";
-import { smartSearch, generateDeliveryCode, createCodedError } from "../../lib/utils";
+import {
+  smartSearch,
+  generateDeliveryCode,
+  createCodedError,
+  isAlreadyExistsError,
+} from "../../lib/utils";
 import { calculateDiscountPercent } from "../../lib/storefront";
 import {
   clampBannerDurationSec,
@@ -228,8 +233,14 @@ export class SupabaseProductRepo implements IProductRepo {
   }
 
   async create(product: Partial<Product>): Promise<Product> {
-    const localProd = await fallbackProductRepo.create(product);
-    if (!isSupabaseConfigured) return localProd;
+    if (!isSupabaseConfigured) {
+      return fallbackProductRepo.create(product);
+    }
+
+    const isOfflineNow = typeof navigator !== "undefined" && navigator.onLine === false;
+    if (isOfflineNow) {
+      return fallbackProductRepo.create(product);
+    }
 
     try {
       const { data, error } = await supabase
@@ -254,11 +265,33 @@ export class SupabaseProductRepo implements IProductRepo {
         .select("*, lojas(nome, codigo, tipo_loja, classificacao, is_vip)")
         .single();
 
-      if (error || !data) return localProd;
-      syncQueue.markProcessed(localProd.id);
-      return mapProductRow(data);
-    } catch {
-      return localProd;
+      if (error || !data) {
+        throw createCodedError(
+          error || "Não foi possível publicar o artigo no servidor.",
+          "Não foi possível publicar o artigo no servidor."
+        );
+      }
+
+      const mapped = mapProductRow(data);
+      if (product.id) {
+        syncQueue.markProcessed(product.id);
+      }
+      return mapped;
+    } catch (err: unknown) {
+      const offlineAfterTry = typeof navigator !== "undefined" && navigator.onLine === false;
+      const rawMsg =
+        err && typeof err === "object" && "message" in err
+          ? String((err as { message?: unknown }).message || "").toLowerCase()
+          : "";
+      const isNetworkFailure =
+        offlineAfterTry ||
+        rawMsg.includes("failed to fetch") ||
+        rawMsg.includes("networkerror") ||
+        rawMsg.includes("load failed");
+      if (isNetworkFailure) {
+        return fallbackProductRepo.create(product);
+      }
+      throw err instanceof Error ? err : createCodedError(err, "Não foi possível publicar o artigo.");
     }
   }
 
@@ -738,6 +771,7 @@ export class SupabaseStoreRepo implements IStoreRepo {
       salesCount: Number(s.encomendas_entregues_count || 0),
       phone: s.telefone,
       createdAt: s.criado_em,
+      clientMutationId: s.client_mutation_id || undefined,
     };
   }
 
@@ -786,32 +820,124 @@ export class SupabaseStoreRepo implements IStoreRepo {
     }
   }
 
-  async create(store: Partial<Store>): Promise<Store> {
-    if (!isSupabaseConfigured) return fallbackStoreRepo.create(store);
-    try {
-      const { data, error } = await supabase
+  private upsertLocalStoreCache(serverStore: Store, replaceLocalId?: string): void {
+    const existing = getStoredStores().filter(
+      (s) =>
+        s.id !== serverStore.id &&
+        (!replaceLocalId || s.id !== replaceLocalId) &&
+        s.ownerId !== serverStore.ownerId
+    );
+    saveStores([serverStore, ...existing]);
+  }
+
+  async findExistingServerStore(ownerId?: string, clientMutationId?: string): Promise<Store | null> {
+    if (!isSupabaseConfigured) return null;
+
+    if (clientMutationId) {
+      const { data: byMutation } = await supabase
         .from("lojas")
-        .insert({
-          dono_id: store.ownerId,
-          nome: store.name,
-          descricao: store.description || "",
-          categoria: store.category || "Geral",
-          tipo_loja: store.storeType || "loja_fixa",
-          municipio: store.municipality || "Uíge",
-          bairro: store.bairro || null,
-          morada: store.address || null,
-          foto_fachada_url: store.facadeImage || null,
-          foto_bi_url: store.biPhotoUrl || null,
-          logo_url: store.logo || store.facadeImage || null,
-          telefone: store.phone || null,
-        })
-        .select()
-        .single();
-      if (error || !data) return fallbackStoreRepo.create(store);
-      return this.mapStoreRow(data);
-    } catch {
-      return fallbackStoreRepo.create(store);
+        .select("*")
+        .eq("client_mutation_id", clientMutationId)
+        .maybeSingle();
+      if (byMutation) return this.mapStoreRow(byMutation);
     }
+
+    if (ownerId && ownerId !== "anon") {
+      const { data: byOwner } = await supabase
+        .from("lojas")
+        .select("*")
+        .eq("dono_id", ownerId)
+        .maybeSingle();
+      if (byOwner) return this.mapStoreRow(byOwner);
+    }
+
+    return null;
+  }
+
+  async syncPendingStore(storePayload: Partial<Store>): Promise<Store | null> {
+    if (!isSupabaseConfigured) return null;
+
+    const existing = await this.findExistingServerStore(
+      storePayload.ownerId,
+      storePayload.clientMutationId
+    );
+    if (existing) {
+      this.upsertLocalStoreCache(existing, storePayload.id);
+      return existing;
+    }
+
+    const { data, error } = await supabase
+      .from("lojas")
+      .insert({
+        dono_id: storePayload.ownerId,
+        nome: storePayload.name,
+        descricao: storePayload.description || "",
+        categoria: storePayload.category || "Geral",
+        tipo_loja: storePayload.storeType || "loja_fixa",
+        municipio: storePayload.municipality || "Uíge",
+        bairro: storePayload.bairro || null,
+        morada: storePayload.address || null,
+        foto_fachada_url: storePayload.facadeImage || null,
+        foto_bi_url: storePayload.biPhotoUrl || null,
+        logo_url: storePayload.logo || storePayload.facadeImage || null,
+        telefone: storePayload.phone || null,
+        client_mutation_id: storePayload.clientMutationId || null,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      if (isAlreadyExistsError(error)) {
+        const matched = await this.findExistingServerStore(
+          storePayload.ownerId,
+          storePayload.clientMutationId
+        );
+        if (matched) {
+          this.upsertLocalStoreCache(matched, storePayload.id);
+          return matched;
+        }
+      }
+      throw error;
+    }
+
+    if (!data) {
+      throw new Error("Falha ao sincronizar a loja.");
+    }
+
+    const mapped = this.mapStoreRow(data);
+    this.upsertLocalStoreCache(mapped, storePayload.id);
+    return mapped;
+  }
+
+  async create(store: Partial<Store>): Promise<Store> {
+    const localStore = await fallbackStoreRepo.create(store);
+    if (!isSupabaseConfigured) return localStore;
+
+    try {
+      const serverStore = await this.syncPendingStore(localStore);
+      if (localStore.clientMutationId) {
+        syncQueue.markProcessed(localStore.clientMutationId);
+      }
+      if (serverStore) {
+        return serverStore;
+      }
+    } catch (err) {
+      if (isAlreadyExistsError(err)) {
+        if (localStore.clientMutationId) {
+          syncQueue.markProcessed(localStore.clientMutationId);
+        }
+        const existing = await this.findExistingServerStore(
+          localStore.ownerId,
+          localStore.clientMutationId
+        ).catch(() => null);
+        if (existing) {
+          this.upsertLocalStoreCache(existing, localStore.id);
+          return existing;
+        }
+      }
+    }
+
+    return localStore;
   }
 
   async toggleVip(id: string, isVip: boolean): Promise<void> {
@@ -2409,7 +2535,8 @@ export class SupabaseSystemHealthRepo implements ISystemHealthRepo {
 export function createRemoteSyncHandlers(
   orderRepo: SupabaseOrderRepo,
   messageRepo: SupabaseMessageRepo,
-  productRepo: SupabaseProductRepo
+  productRepo: SupabaseProductRepo,
+  storeRepo?: SupabaseStoreRepo
 ): RemoteSyncHandlers {
   return {
     createOrder: async (payload: Order) => orderRepo.syncPendingOrder(payload),
@@ -2417,5 +2544,10 @@ export function createRemoteSyncHandlers(
     createProduct: async (payload: Product) => productRepo.create(payload),
     updateStock: async (payload: { id: string; newStock: number }) =>
       productRepo.updateStock(payload.id, payload.newStock),
+    ...(storeRepo
+      ? {
+          createStore: async (payload: Store) => storeRepo.syncPendingStore(payload),
+        }
+      : {}),
   };
 }

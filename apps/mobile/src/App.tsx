@@ -1588,6 +1588,26 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
             }
           />
         )}
+        {view === "store" && !selectedStore && (
+          <div
+            className="max-w-md mx-auto my-8 p-6 rounded-3xl border text-center space-y-3"
+            style={{ backgroundColor: "var(--surface)", borderColor: "var(--border)" }}
+          >
+            <StoreIcon size={36} className="mx-auto text-[#246BFD] opacity-75" />
+            <h2 className="font-black text-base">Loja indisponível</h2>
+            <p className="text-xs opacity-75">
+              Não foi possível carregar os dados desta loja neste momento.
+            </p>
+            <button
+              type="button"
+              onClick={() => navigateTo("stores")}
+              className="px-5 py-2.5 rounded-2xl font-black text-xs text-white cursor-pointer"
+              style={{ backgroundColor: "var(--primary)" }}
+            >
+              Voltar às Lojas
+            </button>
+          </div>
+        )}
 
         {/* VIEW: SEARCH */}
         {view === "search" && (

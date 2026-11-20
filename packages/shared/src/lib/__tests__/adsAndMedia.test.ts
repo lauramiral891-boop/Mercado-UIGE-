@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   SponsoredAd,
   Store,
@@ -31,6 +31,7 @@ import {
   computeBannerDashboardStats,
   computeTargetVideoBitrate,
   validateVideoConstraints,
+  normalizeUploadFileName,
   uploadMediaFile,
   storeHasActivePaidPlan,
   isAdEligibleForPublicDisplay,
@@ -577,8 +578,14 @@ describe("Anúncios em imagem ou vídeo, dados móveis e regras de ecrã inteiro
     expect(draftState.reason).toBe("A aguardar fotografia definitiva");
 
     // 4. Lista pública (getAll(false)) devolve apenas o anúncio sem datas; agendado e rascunho ficam ocultos
-    const publicAds = await repo.getAll(false);
-    expect(publicAds.map((a) => a.id)).toEqual([undatedAd.id]);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(nowMs);
+      const publicAds = await repo.getAll(false);
+      expect(publicAds.map((a) => a.id)).toEqual([undatedAd.id]);
+    } finally {
+      vi.useRealTimers();
+    }
 
     // 5. Rejeita fim anterior ao início
     await expect(
@@ -613,5 +620,19 @@ describe("Anúncios em imagem ou vídeo, dados móveis e regras de ecrã inteiro
     });
     expect(triggerErr.code).toBe("P0001");
     expect(triggerErr.message).toBe("Apenas lojas com plano pago activo podem ter anúncios patrocinados.");
+  });
+
+  it("normaliza nomes de ficheiros e alinha extensão com o MIME comprimido no Storage", () => {
+    const pngAsJpeg = normalizeUploadFileName("Fotografia Café (Uíge) #1.png", "image/jpeg");
+    expect(pngAsJpeg.safeFileName).toBe("Fotografia_Cafe_Uige_1.jpg");
+    expect(pngAsJpeg.contentType).toBe("image/jpeg");
+
+    const webpBanner = normalizeUploadFileName("banner promoção 16:9.JPG", "image/webp");
+    expect(webpBanner.safeFileName).toBe("banner_promocao_16_9.webp");
+    expect(webpBanner.contentType).toBe("image/webp");
+
+    const videoWithCodec = normalizeUploadFileName("Vídeo Loja.MP4", "video/webm;codecs=vp8");
+    expect(videoWithCodec.safeFileName).toBe("Video_Loja.webm");
+    expect(videoWithCodec.contentType).toBe("video/webm");
   });
 });

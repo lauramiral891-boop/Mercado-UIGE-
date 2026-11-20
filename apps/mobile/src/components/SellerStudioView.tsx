@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import {
   Store as StoreIcon,
   Trash2,
@@ -87,6 +87,9 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
   });
   const [facadeBlob, setFacadeBlob] = useState<{ blob: Blob; fileName: string } | null>(null);
   const [biBlob, setBiBlob] = useState<{ blob: Blob; fileName: string } | null>(null);
+  const [creatingStore, setCreatingStore] = useState(false);
+  const createStoreLockRef = useRef(false);
+  const storeMutationIdRef = useRef<string | null>(null);
 
   // Product form
   const [sellerForm, setSellerForm] = useState({
@@ -104,6 +107,10 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
   const [compressingImage, setCompressingImage] = useState(false);
   const [compressedSize, setCompressedSize] = useState<number | null>(null);
   const [pendingUploadBlob, setPendingUploadBlob] = useState<{ blob: Blob; fileName: string } | null>(null);
+  const [publishingProduct, setPublishingProduct] = useState(false);
+  const publishProductLockRef = useRef(false);
+  const [submittingPayment, setSubmittingPayment] = useState(false);
+  const submitPaymentLockRef = useRef(false);
 
   // Plan & Ad payment form
   const [paymentKind, setPaymentKind] = useState<"plano" | "anuncio">("plano");
@@ -176,6 +183,16 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
 
   const handleCreateStore = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (createStoreLockRef.current || creatingStore) {
+      return;
+    }
+
+    if (myStore) {
+      showToast("Já tens uma loja registada. A abrir a tua loja…");
+      await onReload();
+      return;
+    }
+
     if (storeType === "loja_fixa") {
       if (!storeForm.address.trim() || !storeForm.bairro.trim() || !storeForm.facadeImage) {
         showToast("Loja fixa exige morada, bairro e fotografia da fachada.");
@@ -188,17 +205,39 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
       }
     }
 
+    createStoreLockRef.current = true;
+    setCreatingStore(true);
     try {
+      const existingStores = await storeRepo.getAll(true).catch(() => []);
+      const existingOwnerStore = existingStores.find((s) => s.ownerId === user.id);
+      if (existingOwnerStore) {
+        showToast("Já tens uma loja registada. A abrir a tua loja…");
+        await onReload();
+        return;
+      }
+
+      if (!storeMutationIdRef.current) {
+        storeMutationIdRef.current = `store_${user.id}_${Date.now()}_${Math.random()
+          .toString(36)
+          .slice(2, 8)}`;
+      }
+
       let facadeUrl = storeForm.facadeImage;
       let biUrl = storeForm.biPhotoUrl;
       if (isSupabaseConfigured && navigator.onLine) {
         if (facadeBlob) {
           const res = await uploadProductImage(facadeBlob.blob, facadeBlob.fileName, "lojas");
-          if (res.url) facadeUrl = res.url;
+          if (res.error || !res.url) {
+            throw res.error || new Error("Não foi possível carregar a fotografia da fachada.");
+          }
+          facadeUrl = res.url;
         }
         if (biBlob) {
           const res = await uploadProductImage(biBlob.blob, biBlob.fileName, "documentos");
-          if (res.url) biUrl = res.url;
+          if (res.error || !res.url) {
+            throw res.error || new Error("Não foi possível carregar a fotografia do BI.");
+          }
+          biUrl = res.url;
         }
       }
 
@@ -215,8 +254,10 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
         biPhotoUrl: biUrl,
         logo: facadeUrl || biUrl,
         phone: storeForm.phone.trim(),
+        clientMutationId: storeMutationIdRef.current,
       });
 
+      storeMutationIdRef.current = null;
       showToast(
         storeType === "vendedor_ambulante"
           ? "Registo de vendedor ambulante enviado! Aguarda aprovação do administrador."
@@ -225,16 +266,30 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
       await onReload();
     } catch (err: unknown) {
       showToast(translateErrorMessage(err, "Não foi possível registar a loja."));
+    } finally {
+      createStoreLockRef.current = false;
+      setCreatingStore(false);
     }
   };
 
   const handlePublishProduct = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (publishProductLockRef.current || publishingProduct) return;
+
+    publishProductLockRef.current = true;
+    setPublishingProduct(true);
     try {
       let imageUrl = sellerForm.image;
       if (isSupabaseConfigured && pendingUploadBlob && navigator.onLine) {
-        const { url } = await uploadProductImage(pendingUploadBlob.blob, pendingUploadBlob.fileName);
-        if (url) imageUrl = url;
+        const { url, error } = await uploadProductImage(
+          pendingUploadBlob.blob,
+          pendingUploadBlob.fileName,
+          "produtos"
+        );
+        if (error || !url) {
+          throw error || new Error("Não foi possível enviar a fotografia do artigo.");
+        }
+        imageUrl = url;
       }
 
       const created = await productRepo.create({
@@ -247,6 +302,7 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
         brand: sellerForm.brand,
         condition: sellerForm.condition,
         image: imageUrl,
+        images: imageUrl ? [imageUrl] : [],
         municipality: sellerForm.municipality,
         sellerId: user.id,
         storeId: myStore?.id,
@@ -278,11 +334,15 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
       await onReload();
     } catch (err: unknown) {
       showToast(translateErrorMessage(err, "Não foi possível publicar o artigo."));
+    } finally {
+      publishProductLockRef.current = false;
+      setPublishingProduct(false);
     }
   };
 
   const handleSubmitPaymentAndCampaign = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitPaymentLockRef.current || submittingPayment) return;
     if (!myStore) {
       showToast("Regista primeiro a tua loja antes de contratar um plano ou anúncio.");
       return;
@@ -292,6 +352,8 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
       return;
     }
 
+    submitPaymentLockRef.current = true;
+    setSubmittingPayment(true);
     try {
       let finalProofUrl = proofPreview;
       let finalAdImage = adImagePreview || myStore.logo || "";
@@ -299,11 +361,17 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
       if (isSupabaseConfigured && navigator.onLine) {
         if (proofBlob) {
           const res = await uploadProductImage(proofBlob.blob, proofBlob.fileName, "comprovativos");
-          if (res.url) finalProofUrl = res.url;
+          if (res.error || !res.url) {
+            throw res.error || new Error("Não foi possível carregar a imagem do comprovativo.");
+          }
+          finalProofUrl = res.url;
         }
         if (adImageBlob) {
           const res = await uploadProductImage(adImageBlob.blob, adImageBlob.fileName, "anuncios");
-          if (res.url) finalAdImage = res.url;
+          if (res.error || !res.url) {
+            throw res.error || new Error("Não foi possível carregar a imagem do anúncio.");
+          }
+          finalAdImage = res.url;
         }
       }
 
@@ -362,6 +430,9 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
       await onReload();
     } catch (err: unknown) {
       showToast(translateErrorMessage(err, "Não foi possível enviar o comprovativo."));
+    } finally {
+      submitPaymentLockRef.current = false;
+      setSubmittingPayment(false);
     }
   };
 
@@ -584,11 +655,13 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
               />
               <button
                 type="submit"
-                disabled={compressingImage}
-                className="px-5 py-2.5 rounded-2xl font-black text-xs text-white cursor-pointer disabled:opacity-50"
+                data-testid="create-store-btn"
+                disabled={compressingImage || creatingStore}
+                aria-busy={creatingStore}
+                className="px-5 py-2.5 rounded-2xl font-black text-xs text-white cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 style={{ backgroundColor: "var(--primary)" }}
               >
-                Registar Loja
+                {creatingStore ? "A guardar…" : "Criar loja"}
               </button>
             </form>
           )}
@@ -733,11 +806,11 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
 
               <button
                 type="submit"
-                disabled={compressingImage}
+                disabled={compressingImage || publishingProduct}
                 className="w-full py-3 rounded-2xl font-black text-xs text-slate-950 shadow-md cursor-pointer disabled:opacity-50"
                 style={{ backgroundColor: "var(--accent)" }}
               >
-                Publicar no Mercado Uíge
+                {publishingProduct ? "A publicar artigo…" : "Publicar no Mercado Uíge"}
               </button>
             </form>
           </div>
@@ -1095,10 +1168,11 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
 
             <button
               type="submit"
-              className="w-full py-3 rounded-2xl font-black text-slate-950 cursor-pointer"
+              disabled={compressingImage || submittingPayment}
+              className="w-full py-3 rounded-2xl font-black text-slate-950 cursor-pointer disabled:opacity-50"
               style={{ backgroundColor: "var(--accent)" }}
             >
-              Enviar Comprovativo para Activação
+              {submittingPayment ? "A enviar comprovativo…" : "Enviar Comprovativo para Activação"}
             </button>
           </form>
 

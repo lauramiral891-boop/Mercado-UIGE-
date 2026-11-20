@@ -336,6 +336,59 @@ export async function confirmPasswordResetWithOtp(params: {
 
 export const MAX_STORAGE_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB (bucket 'produtos')
 
+const MIME_TO_EXTENSION: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "video/webm": "webm",
+  "video/mp4": "mp4",
+  "video/quicktime": "mov",
+};
+
+const EXTENSION_TO_MIME: Record<string, string> = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+  gif: "image/gif",
+  webm: "video/webm",
+  mp4: "video/mp4",
+  mov: "video/quicktime",
+};
+
+export function normalizeUploadFileName(
+  fileName: string,
+  mimeType?: string
+): { safeFileName: string; contentType?: string } {
+  const normalizedMime = (mimeType || "").split(";")[0].trim().toLowerCase();
+  const asciiName = (fileName || "media")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  const dotIdx = asciiName.lastIndexOf(".");
+  const rawBase = dotIdx > 0 ? asciiName.slice(0, dotIdx) : asciiName;
+  const rawExt = dotIdx > 0 ? asciiName.slice(dotIdx + 1).toLowerCase().replace(/[^a-z0-9]/g, "") : "";
+
+  const cleanBase =
+    rawBase
+      .replace(/[^a-zA-Z0-9_-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 48) || "media";
+
+  const extFromMime = normalizedMime ? MIME_TO_EXTENSION[normalizedMime] : undefined;
+  const finalExt = extFromMime || (rawExt && EXTENSION_TO_MIME[rawExt] ? rawExt : "jpg");
+  const contentType =
+    (normalizedMime && normalizedMime.includes("/") ? normalizedMime : undefined) ||
+    EXTENSION_TO_MIME[finalExt];
+
+  return {
+    safeFileName: `${cleanBase}.${finalExt}`,
+    contentType,
+  };
+}
+
 /**
  * Carrega fotografia ou vídeo comprimido (produto, anúncio, fachada, BI ou comprovativo) para o Supabase Storage
  */
@@ -352,13 +405,14 @@ export async function uploadProductImage(file: File | Blob, fileName: string, fo
   }
 
   const safeFolder = folder.replace(/[^a-z0-9_-]/gi, "") || "produtos";
-  const path = `${safeFolder}/${Date.now()}_${fileName}`;
+  const { safeFileName, contentType } = normalizeUploadFileName(fileName, file.type);
+  const path = `${safeFolder}/${Date.now()}_${safeFileName}`;
   const { error } = await supabase.storage
     .from("produtos")
     .upload(path, file, {
       cacheControl: "3600",
       upsert: true,
-      contentType: file.type || undefined,
+      contentType: contentType || undefined,
     });
 
   if (error) {

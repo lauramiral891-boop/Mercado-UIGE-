@@ -197,8 +197,15 @@ export const CourierView: React.FC<CourierViewProps> = ({
     try {
       let proofUrl = feeProofPreview;
       if (isSupabaseConfigured && feeProofBlob && navigator.onLine) {
-        const { url } = await uploadProductImage(feeProofBlob.blob, feeProofBlob.fileName, "mensalidades");
-        if (url) proofUrl = url;
+        const { url, error } = await uploadProductImage(
+          feeProofBlob.blob,
+          feeProofBlob.fileName,
+          "mensalidades"
+        );
+        if (error || !url) {
+          throw error || new Error("Não foi possível carregar o comprovativo da mensalidade.");
+        }
+        proofUrl = url;
       }
       await deliveryRepo.submitMonthlyFee({
         courierId: user.id,
@@ -244,8 +251,15 @@ export const CourierView: React.FC<CourierViewProps> = ({
     try {
       let proofUrl = planProofPreview;
       if (isSupabaseConfigured && planProofBlob && navigator.onLine) {
-        const { url } = await uploadProductImage(planProofBlob.blob, planProofBlob.fileName, "comprovativos");
-        if (url) proofUrl = url;
+        const { url, error } = await uploadProductImage(
+          planProofBlob.blob,
+          planProofBlob.fileName,
+          "comprovativos"
+        );
+        if (error || !url) {
+          throw error || new Error("Não foi possível carregar o comprovativo do plano.");
+        }
+        proofUrl = url;
       }
       const amountKz = getPlanPriceForType(systemConfig, "entregador", courierTargetPlan);
       await paymentRepo.create({

@@ -90,7 +90,12 @@ import {
   getStoredAppErrors,
   saveAppErrors,
 } from "../../lib/storage";
-import { smartSearch, generateOrderCode, generateDeliveryCode } from "../../lib/utils";
+import {
+  smartSearch,
+  generateOrderCode,
+  generateDeliveryCode,
+  isAlreadyExistsError,
+} from "../../lib/utils";
 import {
   calculateDiscountPercent,
   canUserReviewProduct,
@@ -112,7 +117,7 @@ import {
 export interface SyncAction {
   id: string;
   clientMutationId: string;
-  type: "CREATE_ORDER" | "SEND_MESSAGE" | "CREATE_PRODUCT" | "UPDATE_STOCK" | "REPORT";
+  type: "CREATE_ORDER" | "SEND_MESSAGE" | "CREATE_PRODUCT" | "UPDATE_STOCK" | "CREATE_STORE" | "REPORT";
   payload: any;
   timestamp: number;
   retries: number;
@@ -123,6 +128,7 @@ export interface RemoteSyncHandlers {
   sendMessage?: (messageData: any) => Promise<any>;
   createProduct?: (productData: any) => Promise<any>;
   updateStock?: (stockData: { id: string; newStock: number }) => Promise<any>;
+  createStore?: (storeData: any) => Promise<any>;
 }
 
 function nextReadableCode(prefix: string, existingCodes: (string | undefined)[]): string {
@@ -194,6 +200,18 @@ export class SyncQueue {
     const queue = this.getQueue();
     const mutationId = clientMutationId || `mutation_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
+    const processed = this.getProcessedMutationIds();
+    if (processed.has(mutationId)) {
+      return {
+        id: `processed_${mutationId}`,
+        clientMutationId: mutationId,
+        type,
+        payload: { ...payload, clientMutationId: mutationId },
+        timestamp: Date.now(),
+        retries: 0,
+      };
+    }
+
     const existing = queue.find((a) => a.clientMutationId === mutationId);
     if (existing) {
       return existing;
@@ -238,12 +256,21 @@ export class SyncQueue {
           await handlers.createProduct(action.payload);
         } else if (action.type === "UPDATE_STOCK" && handlers.updateStock) {
           await handlers.updateStock(action.payload);
+        } else if (action.type === "CREATE_STORE" && handlers.createStore) {
+          await handlers.createStore(action.payload);
         }
 
         this.markProcessed(action.clientMutationId);
         processedIds.push(action.id);
         processed++;
-      } catch {
+      } catch (err) {
+        if (isAlreadyExistsError(err)) {
+          // Servidor confirmou que o registo já existe (23505 / "já existe"): pára de repetir permanentemente
+          this.markProcessed(action.clientMutationId);
+          processedIds.push(action.id);
+          processed++;
+          continue;
+        }
         failed++;
         action.retries += 1;
         break;
@@ -738,6 +765,23 @@ export class OfflineStoreRepo implements IStoreRepo {
 
   async create(store: Partial<Store>): Promise<Store> {
     const existing = getStoredStores();
+    const cleanMutationId = store.clientMutationId?.trim() || undefined;
+    const ownerId = store.ownerId || "anon";
+
+    if (cleanMutationId) {
+      const byMutation = existing.find((s) => s.clientMutationId === cleanMutationId);
+      if (byMutation) {
+        return byMutation;
+      }
+    }
+
+    if (ownerId !== "anon") {
+      const byOwner = existing.find((s) => s.ownerId === ownerId);
+      if (byOwner) {
+        return byOwner;
+      }
+    }
+
     const storeType = store.storeType || "loja_fixa";
 
     if (storeType === "loja_fixa") {
@@ -750,11 +794,14 @@ export class OfflineStoreRepo implements IStoreRepo {
       }
     }
 
+    const mutationId =
+      cleanMutationId ||
+      `store_${ownerId}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     const code = nextReadableCode("LJ", existing.map((s) => s.code));
     const newStore: Store = {
-      id: store.id || `store_${Date.now()}`,
+      id: store.id || `store_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       code,
-      ownerId: store.ownerId || "anon",
+      ownerId,
       name: store.name || "Nova Loja",
       description: store.description || "",
       category: store.category || "Electrónicos",
@@ -776,8 +823,10 @@ export class OfflineStoreRepo implements IStoreRepo {
       salesCount: 0,
       phone: store.phone || "",
       createdAt: new Date().toISOString(),
+      clientMutationId: mutationId,
     };
     saveStores([...existing, newStore]);
+    syncQueue.enqueue("CREATE_STORE", newStore, mutationId);
     return newStore;
   }
 

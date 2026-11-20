@@ -1234,13 +1234,19 @@ export const AdsSection: React.FC<{
             );
             if (!coverRes.error && coverRes.url) {
               setImageUrl(coverRes.url);
+              setCompressedImageInfo(`Capa automática: ${cover.sizeKB} KB · ${cover.width}×${cover.height}`);
             } else {
-              setImageUrl(cover.dataUrl);
+              setMediaError(
+                extractServerErrorDetail(
+                  coverRes.error || "Não foi possível guardar a capa automática do vídeo no Storage.",
+                  "O vídeo foi carregado, mas falhou o envio da capa automática. Carrega uma imagem 16:9."
+                )
+              );
             }
           } else {
             setImageUrl(cover.dataUrl);
+            setCompressedImageInfo(`Capa automática: ${cover.sizeKB} KB · ${cover.width}×${cover.height}`);
           }
-          setCompressedImageInfo(`Capa automática: ${cover.sizeKB} KB · ${cover.width}×${cover.height}`);
         } catch {
           setMediaError({
             message:

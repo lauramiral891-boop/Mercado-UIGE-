@@ -40,7 +40,12 @@ export const systemEventRepo = new SupabaseSystemEventRepo();
 export const appErrorRepo = new SupabaseAppErrorRepo();
 export const systemHealthRepo = new SupabaseSystemHealthRepo();
 
-export const remoteSyncHandlers = createRemoteSyncHandlers(orderRepo, messageRepo, productRepo);
+export const remoteSyncHandlers = createRemoteSyncHandlers(
+  orderRepo,
+  messageRepo,
+  productRepo,
+  storeRepo
+);
 export { syncQueue };
 
 export * from "./types";

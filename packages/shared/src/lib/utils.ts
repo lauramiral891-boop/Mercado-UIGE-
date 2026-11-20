@@ -265,6 +265,33 @@ export function createCodedError(err: unknown, fallback = "Erro ao gravar dados 
   return enriched;
 }
 
+export function isAlreadyExistsError(err: unknown): boolean {
+  if (!err) return false;
+  const obj = typeof err === "object" ? (err as Record<string, unknown>) : null;
+  const code = obj ? String(obj.code ?? obj.error_code ?? obj.status ?? "").trim() : "";
+  if (code === "23505" || code === "409") return true;
+
+  const rawText = [
+    typeof err === "string" ? err : "",
+    obj && typeof obj.message === "string" ? obj.message : "",
+    obj && typeof obj.details === "string" ? obj.details : "",
+    obj && typeof obj.hint === "string" ? obj.hint : "",
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  return (
+    rawText.includes("já existe") ||
+    rawText.includes("ja existe") ||
+    rawText.includes("already exists") ||
+    rawText.includes("duplicate key") ||
+    rawText.includes("violates unique constraint") ||
+    rawText.includes("client_mutation_id") ||
+    rawText.includes("uq_lojas_dono_id") ||
+    rawText.includes("uq_lojas_client_mutation_id")
+  );
+}
+
 /**
  * Extrai a mensagem real do servidor traduzida para português e o código técnico (ex.: 42501, PGRST204, 23514)
  * para exibição clara no painel admin sem respostas vagas como "não é possível".

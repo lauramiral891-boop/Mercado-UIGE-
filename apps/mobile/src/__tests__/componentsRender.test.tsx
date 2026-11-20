@@ -1,4 +1,6 @@
 import React from "react";
+import fs from "fs";
+import path from "path";
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
@@ -307,6 +309,56 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
     );
     assertCleanUiMarkup(sellerHtml);
     expect(sellerHtml).toContain("Painel do Comerciante");
+    expect(sellerHtml).toContain("Criar loja");
+    expect(sellerHtml).toContain('data-testid="create-store-btn"');
+
+    const sellerWithStoreHtml = renderToStaticMarkup(
+      <SellerStudioView
+        user={{
+          id: "s1",
+          code: "CL-0003",
+          name: "Maria João",
+          email: "maria@uige.ao",
+          role: "comerciante",
+          province: "Uíge",
+          municipality: "Uíge",
+          walletBalance: 0,
+          createdAt: "2026-01-01T00:00:00Z",
+        }}
+        myStore={{
+          id: "st_existing_1",
+          code: "LJ-0001",
+          ownerId: "s1",
+          name: "Loja Existente da Maria",
+          description: "",
+          category: "Electrónicos",
+          storeType: "loja_fixa",
+          province: "Uíge",
+          municipality: "Uíge",
+          bairro: "Centro da Cidade",
+          address: "Rua Central",
+          logo: "",
+          isApproved: true,
+          isVip: false,
+          rating: 0,
+          salesCount: 0,
+          createdAt: "2026-01-01T00:00:00Z",
+        }}
+        myProducts={[]}
+        categories={DEFAULT_CATEGORIES}
+        storeOrders={[]}
+        myAds={[]}
+        myPayments={[]}
+        systemConfig={DEFAULT_SYSTEM_CONFIG}
+        onOpenAuth={() => {}}
+        onReload={async () => {}}
+        onProductDeleted={() => {}}
+        showToast={() => {}}
+      />
+    );
+    assertCleanUiMarkup(sellerWithStoreHtml);
+    expect(sellerWithStoreHtml).toContain("LJ-0001");
+    expect(sellerWithStoreHtml).not.toContain('data-testid="create-store-btn"');
   });
 
   it("renderiza ProductDetailModal fechado e aberto sem erro de Hooks do React", () => {
@@ -1178,5 +1230,25 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
     expect(cartHtml).toContain('data-testid="cart-wa-btn-st_2"');
     expect(cartHtml).toContain("Enviar por WhatsApp (Loja Alfa)");
     expect(cartHtml).toContain("Enviar por WhatsApp (Loja Beta)");
+  });
+
+  it("define todas as variáveis --rbw-* e @custom-variant dark no src/index.css da pré-visualização (sem ecrã preto transparente)", () => {
+    const rootCssPath = path.resolve(process.cwd(), "src/index.css");
+    const rootCss = fs.readFileSync(rootCssPath, "utf-8");
+    expect(rootCss).toContain("@custom-variant dark");
+    const requiredTokens = [
+      "--rbw-bg",
+      "--rbw-surface",
+      "--rbw-surface-2",
+      "--rbw-border",
+      "--rbw-text",
+      "--rbw-muted",
+      "--rbw-red",
+      "--rbw-red-hover",
+      "--rbw-red-soft",
+    ];
+    for (const token of requiredTokens) {
+      expect(rootCss.split(token).length - 1).toBeGreaterThanOrEqual(2);
+    }
   });
 });

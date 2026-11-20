@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Clock, ShieldAlert, Store as StoreIcon, Upload, X } from "lucide-react";
 import {
   Category,
@@ -50,11 +50,35 @@ export const WantToSellModal: React.FC<WantToSellModalProps> = ({
   const [facadeBlob, setFacadeBlob] = useState<{ blob: Blob; fileName: string } | null>(null);
   const [biBlob, setBiBlob] = useState<{ blob: Blob; fileName: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [detectedStore, setDetectedStore] = useState<Store | null>(myStore);
+  const submitLockRef = useRef(false);
+  const storeMutationIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    setDetectedStore(myStore);
+  }, [myStore]);
+
+  useEffect(() => {
+    if (!isOpen || !user || myStore) return;
+    let cancelled = false;
+    storeRepo
+      .getAll(true)
+      .then((stores) => {
+        if (cancelled) return;
+        const found = stores.find((s) => s.ownerId === user.id) || null;
+        if (found) setDetectedStore(found);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, user, myStore]);
 
   if (!isOpen || !user) return null;
 
+  const effectiveStore = myStore || detectedStore;
   const isPendingMerchant =
-    user.role === "comerciante" || Boolean(myStore);
+    user.role === "comerciante" || Boolean(effectiveStore);
 
   const handleImagePick = async (
     file: File,
@@ -77,6 +101,17 @@ export const WantToSellModal: React.FC<WantToSellModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitLockRef.current || submitting) {
+      return;
+    }
+
+    if (effectiveStore) {
+      showToast("Já tens uma loja registada. A abrir a tua loja…");
+      onClose();
+      onGoToSeller();
+      return;
+    }
+
     if (!storeName.trim()) {
       showToast("Indica o nome da tua loja ou banca.");
       return;
@@ -91,8 +126,26 @@ export const WantToSellModal: React.FC<WantToSellModalProps> = ({
       return;
     }
 
+    submitLockRef.current = true;
     setSubmitting(true);
     try {
+      const existingStores = await storeRepo.getAll(true).catch(() => []);
+      const existingOwnerStore = existingStores.find((s) => s.ownerId === user.id);
+      if (existingOwnerStore) {
+        setDetectedStore(existingOwnerStore);
+        showToast("Já tens uma loja registada. A abrir a tua loja…");
+        await onSubmitted();
+        onClose();
+        onGoToSeller();
+        return;
+      }
+
+      if (!storeMutationIdRef.current) {
+        storeMutationIdRef.current = `store_${user.id}_${Date.now()}_${Math.random()
+          .toString(36)
+          .slice(2, 8)}`;
+      }
+
       let facadeUrl = facadePreview;
       let biUrl = biPreview;
 
@@ -115,30 +168,31 @@ export const WantToSellModal: React.FC<WantToSellModalProps> = ({
         bairro,
       });
 
-      if (!myStore) {
-        await storeRepo.create({
-          ownerId: user.id,
-          name: storeName.trim(),
-          description: "",
-          category,
-          storeType,
-          municipality,
-          bairro,
-          address: address.trim(),
-          facadeImage: facadeUrl,
-          biPhotoUrl: biUrl,
-          logo: facadeUrl || biUrl,
-          phone: phone.trim(),
-          isApproved: false,
-        });
-      }
+      await storeRepo.create({
+        ownerId: user.id,
+        name: storeName.trim(),
+        description: "",
+        category,
+        storeType,
+        municipality,
+        bairro,
+        address: address.trim(),
+        facadeImage: facadeUrl,
+        biPhotoUrl: biUrl,
+        logo: facadeUrl || biUrl,
+        phone: phone.trim(),
+        isApproved: false,
+        clientMutationId: storeMutationIdRef.current,
+      });
 
+      storeMutationIdRef.current = null;
       showToast("Pedido para vender enviado! Aguarda aprovação do administrador.");
       await onSubmitted();
       onClose();
     } catch (err: unknown) {
       showToast(translateErrorMessage(err, "Não foi possível enviar o pedido de vendedor."));
     } finally {
+      submitLockRef.current = false;
       setSubmitting(false);
     }
   };
@@ -176,27 +230,29 @@ export const WantToSellModal: React.FC<WantToSellModalProps> = ({
           <div className="space-y-3 text-xs">
             <div className="p-4 rounded-2xl border border-amber-500/40 bg-amber-500/10 space-y-2">
               <div className="flex items-center gap-2 font-black text-amber-300">
-                {user.isSuspended || myStore?.isSuspended ? (
+                {user.isSuspended || effectiveStore?.isSuspended ? (
                   <ShieldAlert size={16} />
                 ) : (
                   <Clock size={16} />
                 )}
                 <span>
-                  {user.isSuspended || myStore?.isSuspended
+                  {user.isSuspended || effectiveStore?.isSuspended
                     ? "Conta ou loja suspensa"
-                    : user.approvalStatus === "rejeitado" || myStore?.approvalStatus === "rejeitado"
+                    : user.approvalStatus === "rejeitado" || effectiveStore?.approvalStatus === "rejeitado"
                     ? "Registo de vendedor rejeitado"
-                    : user.approvalStatus === "correcao" || myStore?.approvalStatus === "correcao"
+                    : user.approvalStatus === "correcao" || effectiveStore?.approvalStatus === "correcao"
                     ? "Pedido necessita de correcção"
+                    : effectiveStore
+                    ? `Loja registada: ${effectiveStore.name}`
                     : "Registo como comerciante pendente de aprovação"}
                 </span>
               </div>
               <p className="opacity-85 leading-relaxed">
                 {user.correctionNote ||
-                  myStore?.correctionNote ||
+                  effectiveStore?.correctionNote ||
                   user.rejectionReason ||
-                  myStore?.rejectionReason ||
-                  myStore?.suspensionReason ||
+                  effectiveStore?.rejectionReason ||
+                  effectiveStore?.suspensionReason ||
                   "A nossa equipa está a validar os teus documentos. Assim que o administrador aprovar, poderás publicar artigos directamente no botão +."}
               </p>
             </div>
@@ -395,11 +451,13 @@ export const WantToSellModal: React.FC<WantToSellModalProps> = ({
 
             <button
               type="submit"
+              data-testid="want-to-sell-submit-btn"
               disabled={submitting}
-              className="w-full py-3 rounded-2xl font-black text-sm text-slate-950 shadow-lg cursor-pointer disabled:opacity-60"
+              aria-busy={submitting}
+              className="w-full py-3 rounded-2xl font-black text-sm text-slate-950 shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
               style={{ backgroundColor: "var(--accent)" }}
             >
-              {submitting ? "A enviar pedido…" : "Enviar Pedido para Aprovação"}
+              {submitting ? "A guardar…" : "Enviar Pedido para Aprovação"}
             </button>
           </form>
         )}
