@@ -82,8 +82,9 @@ export const StoresSection: React.FC<{
   onPreviewImage: (url: string) => void;
   onApproveStore: (store: Store) => void;
   onSuspendStore: (store: Store) => void;
+  onVerifyStore?: (store: Store) => void;
   onToggleVip: (store: Store) => void;
-}> = ({ currentUser, stores, onPreviewImage, onApproveStore, onSuspendStore, onToggleVip }) => {
+}> = ({ currentUser, stores, onPreviewImage, onApproveStore, onSuspendStore, onVerifyStore, onToggleVip }) => {
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("todas");
   const [statusFilter, setStatusFilter] = useState("todos");
@@ -221,6 +222,13 @@ export const StoresSection: React.FC<{
                         >
                           {s.isSuspended ? "Suspensa" : s.isApproved ? "Activa" : "Pendente"}
                         </span>
+                        <span
+                          className={`block text-[10px] font-bold ${
+                            s.verified ? "text-[#B7F34A]" : "text-[#A6B2C5]"
+                          }`}
+                        >
+                          {s.verified ? "Loja verificada" : "Não verificada"}
+                        </span>
                         {(s.reportsCount || 0) > 0 && (
                           <span className="block text-[10px] text-red-300 font-bold">
                             {s.reportsCount} denúncia(s)
@@ -259,6 +267,19 @@ export const StoresSection: React.FC<{
                               className="px-2.5 py-1 rounded-lg bg-emerald-500 text-slate-950 font-black cursor-pointer"
                             >
                               Aprovar
+                            </button>
+                          )}
+                          {canMod && onVerifyStore && (
+                            <button
+                              type="button"
+                              onClick={() => onVerifyStore(s)}
+                              className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer border ${
+                                s.verified
+                                  ? "bg-[#B7F34A]/15 text-[#B7F34A] border-[#B7F34A]/40"
+                                  : "bg-[#111D30] border-[#26354B] text-[#A6B2C5] hover:text-white"
+                              }`}
+                            >
+                              {s.verified ? "Tirar verificação" : "Verificar"}
                             </button>
                           )}
                           {canMod && (
@@ -354,6 +375,19 @@ export const StoresSection: React.FC<{
                       Aprovar
                     </button>
                   )}
+                  {canMod && onVerifyStore && (
+                    <button
+                      type="button"
+                      onClick={() => onVerifyStore(s)}
+                      className={`py-1.5 px-3 rounded-lg border font-bold cursor-pointer ${
+                        s.verified
+                          ? "bg-[#B7F34A]/15 text-[#B7F34A] border-[#B7F34A]/40"
+                          : "border-[#26354B] text-[#A6B2C5]"
+                      }`}
+                    >
+                      {s.verified ? "Tirar verificação" : "Verificar"}
+                    </button>
+                  )}
                   {canMod && (
                     <button
                       type="button"
@@ -401,7 +435,8 @@ export const UsersSection: React.FC<{
   users: User[];
   onApproveUser: (user: User) => void;
   onSuspendUser: (user: User) => void;
-}> = ({ currentUser, users, onApproveUser, onSuspendUser }) => {
+  onBanUser?: (user: User) => void;
+}> = ({ currentUser, users, onApproveUser, onSuspendUser, onBanUser }) => {
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("todos");
   const [statusFilter, setStatusFilter] = useState("todos");
@@ -414,9 +449,10 @@ export const UsersSection: React.FC<{
     const q = search.trim().toLowerCase();
     return users.filter((u) => {
       if (roleFilter !== "todos" && u.role !== roleFilter) return false;
-      if (statusFilter === "activos" && (u.isSuspended || u.isApproved === false)) return false;
+      if (statusFilter === "activos" && (u.isBanned || u.isSuspended || u.isApproved === false)) return false;
       if (statusFilter === "pendentes" && u.isApproved !== false) return false;
       if (statusFilter === "suspensos" && !u.isSuspended) return false;
+      if (statusFilter === "banidos" && !u.isBanned) return false;
 
       if (q) {
         return (
@@ -486,6 +522,7 @@ export const UsersSection: React.FC<{
           { value: "activos", label: "Activos" },
           { value: "pendentes", label: "Pendentes" },
           { value: "suspensos", label: "Suspensos" },
+          { value: "banidos", label: "Banidos" },
         ]}
         onExportCsv={handleExport}
         totalFiltered={filtered.length}
@@ -524,7 +561,16 @@ export const UsersSection: React.FC<{
                         {u.municipality || "Uíge"}
                       </td>
                       <td className="p-3.5 whitespace-nowrap">
-                        {u.isSuspended ? (
+                        {u.isBanned ? (
+                          <div>
+                            <span className="text-red-500 font-black block">Banido</span>
+                            {u.banReason && (
+                              <span className="text-[10px] text-[#A6B2C5] block max-w-[160px] truncate">
+                                {u.banReason}
+                              </span>
+                            )}
+                          </div>
+                        ) : u.isSuspended ? (
                           <span className="text-red-400 font-bold">Suspenso</span>
                         ) : u.isApproved === false ? (
                           <span className="text-amber-400 font-bold">Pendente</span>
@@ -545,17 +591,32 @@ export const UsersSection: React.FC<{
                               </button>
                             )}
                             {u.id !== currentUser.id && (
-                              <button
-                                type="button"
-                                onClick={() => onSuspendUser(u)}
-                                className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer ${
-                                  u.isSuspended
-                                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                                    : "bg-red-500/15 text-red-400 border border-red-500/30"
-                                }`}
-                              >
-                                {u.isSuspended ? "Reactivar" : "Suspender"}
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => onSuspendUser(u)}
+                                  className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer ${
+                                    u.isSuspended
+                                      ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                                      : "bg-red-500/15 text-red-400 border border-red-500/30"
+                                  }`}
+                                >
+                                  {u.isSuspended ? "Reactivar" : "Suspender"}
+                                </button>
+                                {onBanUser && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onBanUser(u)}
+                                    className={`px-2.5 py-1 rounded-lg font-black cursor-pointer ${
+                                      u.isBanned
+                                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                                        : "bg-red-600 text-white"
+                                    }`}
+                                  >
+                                    {u.isBanned ? "Desbanir" : "Banir"}
+                                  </button>
+                                )}
+                              </>
                             )}
                           </div>
                         )}
@@ -580,12 +641,12 @@ export const UsersSection: React.FC<{
                     {formatUserRole(u.role)}
                   </span>
                 </div>
-                <div className="flex items-center justify-between pt-2 border-t border-[#26354B]">
-                  <span className={u.isSuspended ? "text-red-400 font-bold" : "text-emerald-400 font-bold"}>
-                    {u.isSuspended ? "Suspenso" : u.isApproved === false ? "Pendente" : "Activo"}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#26354B]">
+                  <span className={u.isBanned || u.isSuspended ? "text-red-400 font-bold" : "text-emerald-400 font-bold"}>
+                    {u.isBanned ? "Banido" : u.isSuspended ? "Suspenso" : u.isApproved === false ? "Pendente" : "Activo"}
                   </span>
                   {canMod && u.id !== currentUser.id && (
-                    <div className="flex gap-2">
+                    <div className="flex flex-wrap gap-2">
                       {u.isApproved === false && (
                         <button
                           type="button"
@@ -602,6 +663,19 @@ export const UsersSection: React.FC<{
                       >
                         {u.isSuspended ? "Reactivar" : "Suspender"}
                       </button>
+                      {onBanUser && (
+                        <button
+                          type="button"
+                          onClick={() => onBanUser(u)}
+                          className={`px-3 py-1 rounded-lg font-black cursor-pointer ${
+                            u.isBanned
+                              ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                              : "bg-red-600 text-white"
+                          }`}
+                        >
+                          {u.isBanned ? "Desbanir" : "Banir"}
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2780,11 +2854,21 @@ export const DeliveriesSection: React.FC<{
 export const ReportsSection: React.FC<{
   reports: ReportItem[];
   onResolveReport: (report: ReportItem, status: "resolvido" | "rejeitado") => void;
-}> = ({ reports, onResolveReport }) => {
+  onModerateReportedProduct?: (productId: string, action: "restaurar" | "remover") => void;
+}> = ({ reports, onResolveReport, onModerateReportedProduct }) => {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("todos");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+
+  const formatReportTarget = (rep: ReportItem) => {
+    if (rep.reviewId) {
+      return `Avaliação (${rep.reviewType || "produto"}): ${rep.storeName || rep.productName || "Comentário"}`;
+    }
+    if (rep.productName) return `Artigo: ${rep.productName}`;
+    if (rep.storeName) return `Loja: ${rep.storeName}`;
+    return "Denúncia";
+  };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -2807,7 +2891,7 @@ export const ReportsSection: React.FC<{
     <div className="space-y-4 anim-fadeUp">
       <TableToolbar
         title="Denúncias e Moderação"
-        subtitle="Revê relatos contra lojas ou produtos. Lojas atingindo o limite configurado são suspensas no servidor."
+        subtitle="Revê relatos contra artigos, lojas ou avaliações. Artigos com 3+ denúncias distintas ficam ocultos automaticamente até decisão da moderação."
         search={search}
         onSearchChange={(v) => {
           setSearch(v);
@@ -2829,7 +2913,7 @@ export const ReportsSection: React.FC<{
           downloadCsv(
             "denuncias-mercado-uige",
             ["Alvo", "Motivo", "Estado", "Data"],
-            filtered.map((r) => [r.storeName || r.productName || "Relato", r.reason, r.status, fmtDateTime(r.createdAt)])
+            filtered.map((r) => [formatReportTarget(r), r.reason, r.status, fmtDateTime(r.createdAt)])
           )
         }
         totalFiltered={filtered.length}
@@ -2856,29 +2940,49 @@ export const ReportsSection: React.FC<{
                 <tbody className="divide-y divide-[#26354B]">
                   {paged.map((rep) => (
                     <tr key={rep.id} className="hover:bg-[#111D30]/40">
-                      <td className="p-3.5 font-bold text-white">{rep.storeName ? `Loja: ${rep.storeName}` : rep.productName || "Denúncia"}</td>
+                      <td className="p-3.5 font-bold text-white">{formatReportTarget(rep)}</td>
                       <td className="p-3.5 text-[#A6B2C5]">{rep.reason}</td>
                       <td className="p-3.5 text-[#A6B2C5] whitespace-nowrap">{fmtDateTime(rep.createdAt)}</td>
                       <td className="p-3.5 capitalize font-bold text-white">{rep.status}</td>
                       <td className="p-3.5 text-right whitespace-nowrap">
-                        {rep.status === "pendente" && (
-                          <div className="inline-flex gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => onResolveReport(rep, "resolvido")}
-                              className="px-2.5 py-1 rounded-lg bg-emerald-500 text-slate-950 font-black cursor-pointer"
-                            >
-                              Resolver
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => onResolveReport(rep, "rejeitado")}
-                              className="px-2.5 py-1 rounded-lg bg-[#111D30] border border-[#26354B] text-[#A6B2C5] font-bold cursor-pointer"
-                            >
-                              Rejeitar
-                            </button>
-                          </div>
-                        )}
+                        <div className="inline-flex gap-1.5">
+                          {rep.productId && onModerateReportedProduct && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => onModerateReportedProduct(rep.productId!, "restaurar")}
+                                className="px-2.5 py-1 rounded-lg bg-[#246BFD]/20 border border-[#246BFD]/40 text-blue-200 font-bold cursor-pointer"
+                              >
+                                Restaurar artigo
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onModerateReportedProduct(rep.productId!, "remover")}
+                                className="px-2.5 py-1 rounded-lg bg-red-500/15 border border-red-500/30 text-red-300 font-bold cursor-pointer"
+                              >
+                                Remover artigo
+                              </button>
+                            </>
+                          )}
+                          {rep.status === "pendente" && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => onResolveReport(rep, "resolvido")}
+                                className="px-2.5 py-1 rounded-lg bg-emerald-500 text-slate-950 font-black cursor-pointer"
+                              >
+                                Resolver
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onResolveReport(rep, "rejeitado")}
+                                className="px-2.5 py-1 rounded-lg bg-[#111D30] border border-[#26354B] text-[#A6B2C5] font-bold cursor-pointer"
+                              >
+                                Rejeitar
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -2890,27 +2994,49 @@ export const ReportsSection: React.FC<{
           <div className="md:hidden space-y-3">
             {paged.map((rep) => (
               <div key={rep.id} className="p-4 rounded-2xl bg-[#172338] border border-[#26354B] space-y-2 text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-white">{rep.storeName || rep.productName || "Denúncia"}</span>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-white">{formatReportTarget(rep)}</span>
                   <span className="capitalize font-bold text-amber-300">{rep.status}</span>
                 </div>
                 <p className="text-[#A6B2C5]">{rep.reason}</p>
-                {rep.status === "pendente" && (
-                  <div className="pt-2 border-t border-[#26354B] flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => onResolveReport(rep, "resolvido")}
-                      className="flex-1 py-1.5 rounded-lg bg-emerald-500 text-slate-950 font-black cursor-pointer"
-                    >
-                      Resolver
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onResolveReport(rep, "rejeitado")}
-                      className="px-3 py-1.5 rounded-lg bg-[#111D30] border border-[#26354B] text-[#A6B2C5] font-bold cursor-pointer"
-                    >
-                      Rejeitar
-                    </button>
+                {(rep.status === "pendente" || (rep.productId && onModerateReportedProduct)) && (
+                  <div className="pt-2 border-t border-[#26354B] flex flex-wrap gap-2">
+                    {rep.productId && onModerateReportedProduct && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => onModerateReportedProduct(rep.productId!, "restaurar")}
+                          className="px-3 py-1.5 rounded-lg bg-[#246BFD]/20 border border-[#246BFD]/40 text-blue-200 font-bold cursor-pointer"
+                        >
+                          Restaurar artigo
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onModerateReportedProduct(rep.productId!, "remover")}
+                          className="px-3 py-1.5 rounded-lg bg-red-500/15 border border-red-500/30 text-red-300 font-bold cursor-pointer"
+                        >
+                          Remover artigo
+                        </button>
+                      </>
+                    )}
+                    {rep.status === "pendente" && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => onResolveReport(rep, "resolvido")}
+                          className="flex-1 py-1.5 rounded-lg bg-emerald-500 text-slate-950 font-black cursor-pointer"
+                        >
+                          Resolver
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onResolveReport(rep, "rejeitado")}
+                          className="px-3 py-1.5 rounded-lg bg-[#111D30] border border-[#26354B] text-[#A6B2C5] font-bold cursor-pointer"
+                        >
+                          Rejeitar
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -2940,6 +3066,8 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   LOGIN_ADMIN: "Acesso ao painel",
   SUSPEND_USER: "Suspensão de utilizador",
   UNSUSPEND_USER: "Reactivação de utilizador",
+  BAN_USER: "Banimento de utilizador",
+  UNBAN_USER: "Remoção de banimento",
   APPROVE_USER: "Aprovação / Revisão de conta",
   REJECT_USER: "Rejeição de conta",
   REQUEST_CORRECTION_USER: "Pedido de correcção de conta",
@@ -2948,8 +3076,12 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   REQUEST_CORRECTION_STORE: "Pedido de correcção de loja",
   SUSPEND_STORE: "Suspensão de loja",
   UNSUSPEND_STORE: "Reactivação de loja",
+  VERIFY_STORE: "Atribuição de selo Loja Verificada",
+  UNVERIFY_STORE: "Remoção de selo Loja Verificada",
   SET_STORE_VIP: "Atribuição de selo VIP",
   UNSET_STORE_VIP: "Remoção de selo VIP",
+  APPROVE_PRODUCT: "Aprovação de artigo",
+  RESTORE_PRODUCT: "Restauro de artigo",
   DELETE_PRODUCT: "Remoção de artigo",
   RESOLVE_REPORT: "Resolução de denúncia",
   SEND_BROADCAST: "Envio de aviso provincial",

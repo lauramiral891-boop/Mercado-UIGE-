@@ -230,7 +230,7 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
     );
     assertCleanUiMarkup(wantToSellHtml);
     expect(wantToSellHtml).toContain("Quero Vender no Uíge");
-    expect(wantToSellHtml).toContain("Enviar Pedido para Aprovação");
+    expect(wantToSellHtml).toContain("Criar Loja e Vender Agora");
   });
 
   it("renderiza ProductCard com selo Usado, tipo de loja, código e preço em Kz", () => {
@@ -935,6 +935,7 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
       logo: "",
       cover: "https://cdn.example.com/capa.jpg",
       isApproved: true,
+      verified: true,
       isVip: false,
       rating: 0,
       reviewsCount: 0,
@@ -944,7 +945,13 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
       createdAt: "2026-01-15T10:00:00Z",
     };
 
-    const unapprovedStore = { ...storeA, id: "st_pending", isApproved: false, name: "Loja Pendente" };
+    const unapprovedStore = {
+      ...storeA,
+      id: "st_pending",
+      isApproved: true,
+      verified: false,
+      name: "Loja Não Verificada",
+    };
 
     const mixedProducts: Product[] = [
       {
@@ -1030,6 +1037,7 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
     );
     assertCleanUiMarkup(pendingHtml);
     expect(pendingHtml).not.toContain("Loja verificada");
+    expect(pendingHtml).toContain("Vendedor não verificado");
     expect(pendingHtml).toContain("Esta loja ainda não publicou artigos");
     expect(pendingHtml).toContain("A seguir loja");
   });
@@ -1067,6 +1075,7 @@ describe("Auditoria de Renderização dos Ecrãs e Componentes (Mobile & Admin)"
           municipality: "Negage",
           logo: "",
           isApproved: true,
+          verified: true,
           isVip: false,
           rating: 0,
           salesCount: 0,

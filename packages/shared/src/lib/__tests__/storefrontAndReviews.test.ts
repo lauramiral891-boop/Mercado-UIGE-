@@ -87,13 +87,13 @@ describe("Loja, Produto, Seguidores e Avaliações Verificadas (FASE 10)", () =>
     expect(empty.breakdown.every((row) => row.count === 0 && row.percent === 0)).toBe(true);
 
     expect(
-      isStoreVerified({ isApproved: false, isSuspended: false })
+      isStoreVerified({ verified: false, isSuspended: false })
     ).toBe(false);
     expect(
-      isStoreVerified({ isApproved: true, isSuspended: true })
+      isStoreVerified({ verified: true, isSuspended: true })
     ).toBe(false);
     expect(
-      isStoreVerified({ isApproved: true, isSuspended: false })
+      isStoreVerified({ verified: true, isSuspended: false })
     ).toBe(true);
     expect(formatActiveSince("2026-01-15T12:00:00Z").length).toBeGreaterThan(0);
   });
@@ -184,6 +184,9 @@ describe("Loja, Produto, Seguidores e Avaliações Verificadas (FASE 10)", () =>
       stock: 10,
       categoryName: "Electrónica",
       municipality: "Uíge",
+      bairro: "Catapa",
+      whatsapp: "923000111",
+      image: "https://cdn.uige.ao/auscultadores.jpg",
       isApproved: true,
     });
 

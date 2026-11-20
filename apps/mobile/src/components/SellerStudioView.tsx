@@ -39,6 +39,8 @@ import {
   uploadProductImage,
   isSupabaseConfigured,
   translateErrorMessage,
+  checkDailyPublishQuota,
+  validateProductPublishFields,
 } from "@mercado-uige/shared";
 
 interface SellerStudioViewProps {
@@ -92,6 +94,7 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
   const storeMutationIdRef = useRef<string | null>(null);
 
   // Product form
+  const initialProdMun = myStore?.municipality || user?.municipality || "Uíge";
   const [sellerForm, setSellerForm] = useState({
     name: "",
     description: "",
@@ -102,7 +105,9 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
     brand: "",
     condition: "novo" as "novo" | "usado",
     image: "",
-    municipality: "Uíge",
+    municipality: initialProdMun,
+    bairro: myStore?.bairro || user?.bairro || getBairrosByMunicipality(initialProdMun)[0],
+    whatsapp: myStore?.phone || user?.phone || "",
   });
   const [compressingImage, setCompressingImage] = useState(false);
   const [compressedSize, setCompressedSize] = useState<number | null>(null);
@@ -160,6 +165,13 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
   const totalViews = myAds.reduce((s, a) => s + Number(a.views || 0), 0);
   const totalClicks = myAds.reduce((s, a) => s + Number(a.clicks || 0), 0);
   const storeBairros = getBairrosByMunicipality(storeForm.municipality);
+  const productBairros = getBairrosByMunicipality(sellerForm.municipality);
+  const dailyQuota = checkDailyPublishQuota({
+    products: myProducts,
+    sellerId: user.id,
+    userCreatedAt: user.createdAt,
+    config: systemConfig,
+  });
   const merchantRoleType: "loja_fixa" | "vendedor_ambulante" =
     myStore?.storeType === "vendedor_ambulante" ? "vendedor_ambulante" : "loja_fixa";
   const basicPlanPrice = getPlanPriceForType(systemConfig, merchantRoleType, "basico");
@@ -254,15 +266,13 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
         biPhotoUrl: biUrl,
         logo: facadeUrl || biUrl,
         phone: storeForm.phone.trim(),
+        isApproved: true,
+        approvalStatus: "aprovado",
         clientMutationId: storeMutationIdRef.current,
       });
 
       storeMutationIdRef.current = null;
-      showToast(
-        storeType === "vendedor_ambulante"
-          ? "Registo de vendedor ambulante enviado! Aguarda aprovação do administrador."
-          : "Loja registada! Aguarda validação para activar no catálogo."
-      );
+      showToast("Loja criada e activada! Já podes publicar artigos no Mercado Uíge ✓");
       await onReload();
     } catch (err: unknown) {
       showToast(translateErrorMessage(err, "Não foi possível registar a loja."));
@@ -275,6 +285,35 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
   const handlePublishProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     if (publishProductLockRef.current || publishingProduct) return;
+
+    if (user.isBanned || user.isSuspended || myStore?.isSuspended) {
+      showToast(
+        user.banReason ||
+          myStore?.suspensionReason ||
+          "A tua conta ou loja encontra-se impedida de publicar artigos."
+      );
+      return;
+    }
+
+    if (!dailyQuota.allowed) {
+      showToast(
+        `Limite diário de ${dailyQuota.limit} artigos atingido. Tenta novamente amanhã.`
+      );
+      return;
+    }
+
+    const validation = validateProductPublishFields({
+      name: sellerForm.name,
+      price: sellerForm.price,
+      whatsapp: sellerForm.whatsapp,
+      bairro: sellerForm.bairro,
+      image: sellerForm.image,
+      images: sellerForm.image ? [sellerForm.image] : [],
+    });
+    if (!validation.ok) {
+      showToast(validation.error || "Preenche os campos obrigatórios para publicar.");
+      return;
+    }
 
     publishProductLockRef.current = true;
     setPublishingProduct(true);
@@ -304,6 +343,8 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
         image: imageUrl,
         images: imageUrl ? [imageUrl] : [],
         municipality: sellerForm.municipality,
+        bairro: sellerForm.bairro.trim(),
+        whatsapp: validation.normalizedWhatsapp || sellerForm.whatsapp.trim(),
         sellerId: user.id,
         storeId: myStore?.id,
         storeName: myStore?.name,
@@ -311,6 +352,7 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
         isApproved: !systemConfig.requireProductApproval,
       });
 
+      const resetMun = myStore?.municipality || user?.municipality || "Uíge";
       setSellerForm({
         name: "",
         description: "",
@@ -321,16 +363,22 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
         brand: "",
         condition: "novo",
         image: "",
-        municipality: "Uíge",
+        municipality: resetMun,
+        bairro: myStore?.bairro || user?.bairro || getBairrosByMunicipality(resetMun)[0],
+        whatsapp: myStore?.phone || user?.phone || "",
       });
       setPendingUploadBlob(null);
       setCompressedSize(null);
-      const pending = Boolean(systemConfig.requireProductApproval) || created.isApproved === false;
-      showToast(
-        pending
-          ? "Artigo enviado! Aguarda aprovação do administrador."
-          : "Artigo anunciado com sucesso no Mercado Uíge!"
-      );
+      if (created.moderationStatus === "em_revisao") {
+        showToast(
+          created.moderationReason ||
+            "Artigo retido em revisão por conter termos sujeitos a verificação."
+        );
+      } else if (Boolean(systemConfig.requireProductApproval) || created.isApproved === false) {
+        showToast("Artigo enviado! Aguarda aprovação do administrador.");
+      } else {
+        showToast("Artigo anunciado com sucesso no Mercado Uíge!");
+      }
       await onReload();
     } catch (err: unknown) {
       showToast(translateErrorMessage(err, "Não foi possível publicar o artigo."));
@@ -447,10 +495,10 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
         )}
       </div>
 
-      {user.isApproved === false && (
-        <div className="p-3.5 rounded-2xl bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2">
+      {user.isBanned && (
+        <div className="p-3.5 rounded-2xl bg-red-500/15 border border-red-500/35 text-red-400 text-xs flex items-center gap-2">
           <Clock size={16} className="shrink-0" />
-          <span>A tua conta de comerciante aguarda validação inicial do administrador.</span>
+          <span>Conta banida: {user.banReason || "Contacta o suporte."}</span>
         </div>
       )}
 
@@ -460,7 +508,7 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
           <span>
             {myStore.isSuspended
               ? `Loja suspensa: ${myStore.suspensionReason || "Contacta o suporte."}`
-              : "A tua loja está em análise pelo administrador e ficará visível após aprovação."}
+              : "A tua loja está temporariamente desactivada pela administração."}
           </span>
         </div>
       )}
@@ -639,8 +687,8 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
                       }}
                     />
                   </label>
-                  <p className="text-[11px] text-amber-400">
-                    Vendedores ambulantes só ficam activos no mercado depois da aprovação do administrador.
+                  <p className="text-[11px] text-[#B7F34A]">
+                    Activa imediatamente para começar a vender (sujeito a moderação pós-publicação).
                   </p>
                 </div>
               )}
@@ -668,9 +716,12 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
 
           {/* Publish Product Form */}
           <div className="p-4 sm:p-5 rounded-3xl border space-y-3" style={{ backgroundColor: "var(--surface)", borderColor: "var(--border)" }}>
-            <h2 className="font-black text-sm pb-2 border-b" style={{ borderColor: "var(--border)" }}>
-              Publicar Novo Artigo
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b" style={{ borderColor: "var(--border)" }}>
+              <h2 className="font-black text-sm">Publicar Novo Artigo</h2>
+              <span className={`text-[11px] font-bold ${dailyQuota.allowed ? "opacity-75" : "text-red-400"}`}>
+                Hoje: {dailyQuota.used}/{dailyQuota.limit} artigos
+              </span>
+            </div>
             <form onSubmit={handlePublishProduct} className="space-y-3 text-xs">
               <div>
                 <label className="block font-bold mb-1">Nome do Artigo *</label>
@@ -769,7 +820,15 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
                   <label className="block font-bold mb-1">Município</label>
                   <select
                     value={sellerForm.municipality}
-                    onChange={(e) => setSellerForm({ ...sellerForm, municipality: e.target.value })}
+                    onChange={(e) => {
+                      const mun = e.target.value;
+                      const nextBairros = getBairrosByMunicipality(mun);
+                      setSellerForm({
+                        ...sellerForm,
+                        municipality: mun,
+                        bairro: nextBairros.includes(sellerForm.bairro) ? sellerForm.bairro : nextBairros[0],
+                      });
+                    }}
                     className="w-full p-2.5 rounded-xl border outline-none"
                     style={{ borderColor: "var(--border)", backgroundColor: "var(--surface-secondary)", color: "var(--text-primary)" }}
                   >
@@ -780,8 +839,36 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
                 </div>
               </div>
 
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <label className="block font-bold mb-1">Bairro no Uíge *</label>
+                  <select
+                    value={sellerForm.bairro}
+                    onChange={(e) => setSellerForm({ ...sellerForm, bairro: e.target.value })}
+                    className="w-full p-2.5 rounded-xl border outline-none"
+                    style={{ borderColor: "var(--border)", backgroundColor: "var(--surface-secondary)", color: "var(--text-primary)" }}
+                  >
+                    {productBairros.map((b) => (
+                      <option key={b} value={b} className="bg-slate-900 text-white">{b}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold mb-1">WhatsApp de contacto *</label>
+                  <input
+                    type="tel"
+                    required
+                    value={sellerForm.whatsapp}
+                    onChange={(e) => setSellerForm({ ...sellerForm, whatsapp: e.target.value })}
+                    placeholder="923 000 000"
+                    className="w-full p-2.5 rounded-xl border bg-transparent font-medium outline-none"
+                    style={{ borderColor: "var(--border)" }}
+                  />
+                </div>
+              </div>
+
               <div>
-                <label className="block font-bold mb-1">Fotografia do Artigo (Compressão automática)</label>
+                <label className="block font-bold mb-1">Fotografia do Artigo * (Compressão automática)</label>
                 <input
                   type="file"
                   accept="image/*"
@@ -806,7 +893,7 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
 
               <button
                 type="submit"
-                disabled={compressingImage || publishingProduct}
+                disabled={compressingImage || publishingProduct || !dailyQuota.allowed}
                 className="w-full py-3 rounded-2xl font-black text-xs text-slate-950 shadow-md cursor-pointer disabled:opacity-50"
                 style={{ backgroundColor: "var(--accent)" }}
               >
@@ -835,9 +922,17 @@ export const SellerStudioView: React.FC<SellerStudioViewProps> = ({
                     </span>
                     <span className="text-[#B7F34A] font-black tabular-nums">{fmtKz(mp.price)}</span>
                     <span className="opacity-65 ml-2">Stock: {mp.stock} un.</span>
-                    {mp.isApproved === false && (
+                    {mp.moderationStatus === "removido" ? (
+                      <span className="ml-2 text-red-400 font-bold">
+                        · Removido{mp.moderationReason ? `: ${mp.moderationReason}` : ""}
+                      </span>
+                    ) : mp.moderationStatus === "em_revisao" ? (
+                      <span className="ml-2 text-amber-400 font-bold">
+                        · Em revisão{mp.moderationReason ? ` (${mp.moderationReason})` : ""}
+                      </span>
+                    ) : mp.isApproved === false ? (
                       <span className="ml-2 text-amber-400 font-bold">· Em aprovação</span>
-                    )}
+                    ) : null}
                   </div>
                   <button
                     type="button"

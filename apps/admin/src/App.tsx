@@ -287,7 +287,7 @@ export const AdminApp: React.FC = () => {
         await Promise.all([
           userRepo.getAll(),
           storeRepo.getAll(true),
-          productRepo.getAll(),
+          productRepo.getAll({ includeUnapproved: true }),
           orderRepo.getAll(),
           reportRepo.getAll(),
           adRepo.getAll(true),
@@ -685,6 +685,39 @@ export const AdminApp: React.FC = () => {
     });
   };
 
+  const requestVerifyStore = (store: StoreType) => {
+    if (!currentUser) return;
+    const nextVerified = !store.verified;
+    openConfirm({
+      title: nextVerified ? `Verificar loja "${store.name}"?` : `Remover selo de verificação de "${store.name}"?`,
+      description: nextVerified
+        ? "A loja passará a exibir o selo oficial «Loja verificada» no catálogo e página da loja."
+        : "A loja voltará a aparecer como «Vendedor não verificado».",
+      confirmLabel: nextVerified ? "Atribuir Verificada" : "Remover Verificação",
+      tone: nextVerified ? "primary" : "warning",
+      requireReason: !nextVerified,
+      reasonLabel: "Motivo *",
+      action: async (reason) => {
+        await storeRepo.verifyStore(store.id, nextVerified, reason || undefined);
+        await auditRepo.log(
+          currentUser.id,
+          nextVerified ? "VERIFY_STORE" : "UNVERIFY_STORE",
+          `${store.name} (${store.code || store.id})`,
+          reason ? { reason } : undefined
+        );
+        await notificationRepo.create({
+          userId: store.ownerId,
+          title: nextVerified ? "Loja verificada no Mercado Uíge" : "Verificação da loja removida",
+          body: nextVerified
+            ? `Parabéns! A loja "${store.name}" recebeu o selo de Loja Verificada.`
+            : `O selo de verificação da loja "${store.name}" foi removido${reason ? `: ${reason}` : "."}`,
+          type: "info",
+        });
+        showToast(nextVerified ? "Loja marcada como verificada." : "Verificação removida.");
+      },
+    });
+  };
+
   const requestToggleVip = (store: StoreType) => {
     if (!currentUser) return;
     const nextVip = !store.isVip;
@@ -732,25 +765,51 @@ export const AdminApp: React.FC = () => {
     });
   };
 
+  const requestBanUser = (targetUser: User) => {
+    if (!currentUser) return;
+    const banning = !targetUser.isBanned;
+    openConfirm({
+      title: banning ? `Banir conta de ${targetUser.name}?` : `Remover banimento de ${targetUser.name}?`,
+      description: banning
+        ? "O utilizador fica permanentemente bloqueado e não poderá publicar nem aceder como vendedor."
+        : "O banimento será levantado e a conta poderá aceder normalmente.",
+      confirmLabel: banning ? "Banir Utilizador" : "Desbanir Utilizador",
+      tone: banning ? "danger" : "primary",
+      requireReason: banning,
+      reasonLabel: "Motivo do banimento *",
+      reasonPlaceholder: "Ex.: Publicação recorrente de conteúdo proibido ou fraude...",
+      action: async (reason) => {
+        await userRepo.banUser(targetUser.id, banning, reason || undefined);
+        await auditRepo.log(
+          currentUser.id,
+          banning ? "BAN_USER" : "UNBAN_USER",
+          `${targetUser.name} (${targetUser.email})`,
+          reason ? { reason } : undefined
+        );
+        showToast(banning ? "Utilizador banido." : "Banimento removido.");
+      },
+    });
+  };
+
   const requestApproveProduct = (product: Product) => {
     if (!currentUser) return;
     openConfirm({
-      title: `Aprovar artigo "${product.name}"?`,
+      title: `Restaurar / publicar artigo "${product.name}"?`,
       description: "O artigo passará a ficar imediatamente visível no catálogo provincial para todos os clientes.",
-      confirmLabel: "Aprovar Artigo",
+      confirmLabel: "Restaurar Artigo",
       tone: "primary",
       action: async () => {
-        await productRepo.approve(product.id, true);
-        await auditRepo.log(currentUser.id, "APPROVE_PRODUCT", product.name);
+        await productRepo.moderateProduct(product.id, "restaurar");
+        await auditRepo.log(currentUser.id, "RESTORE_PRODUCT", product.name, { productId: product.id });
         if (product.sellerId) {
           await notificationRepo.create({
             userId: product.sellerId,
-            title: "Artigo aprovado",
-            body: `O teu artigo "${product.name}" foi aprovado e já está visível no catálogo.`,
+            title: "Artigo restaurado e publicado",
+            body: `O teu artigo "${product.name}" foi restaurado e já está visível no catálogo.`,
             type: "info",
           });
         }
-        showToast("Artigo aprovado e publicado.");
+        showToast("Artigo restaurado e publicado.");
       },
     });
   };
@@ -759,17 +818,52 @@ export const AdminApp: React.FC = () => {
     if (!currentUser) return;
     openConfirm({
       title: `Remover artigo "${product.name}"?`,
-      description: "Esta acção elimina o artigo permanentemente do catálogo provincial e regista na auditoria.",
+      description: "Esta acção remove o artigo do catálogo provincial, notifica o vendedor e regista na auditoria.",
       confirmLabel: "Remover Artigo",
       tone: "danger",
       requireReason: true,
       reasonLabel: "Motivo da remoção *",
       action: async (reason) => {
-        await productRepo.delete(product.id);
+        await productRepo.moderateProduct(product.id, "remover", reason || "Removido pela moderação");
         await auditRepo.log(currentUser.id, "DELETE_PRODUCT", product.name, { productId: product.id, reason });
+        if (product.sellerId) {
+          await notificationRepo.create({
+            userId: product.sellerId,
+            title: "Artigo removido pela moderação",
+            body: `O artigo "${product.name}" foi removido: ${reason}`,
+            type: "security",
+          });
+        }
         showToast("Artigo removido do catálogo.");
       },
     });
+  };
+
+  const requestModerateReportedProduct = (productId: string, action: "restaurar" | "remover") => {
+    const target = products.find((p) => p.id === productId);
+    const prodObj: Product = target || ({
+      id: productId,
+      name: `Artigo #${productId.slice(0, 6)}`,
+      description: "",
+      price: 0,
+      discount: 0,
+      stock: 0,
+      categoryName: "",
+      condition: "novo",
+      image: "",
+      province: "Uíge",
+      municipality: "Uíge",
+      isApproved: false,
+      sales: 0,
+      rating: 0,
+      reviewsCount: 0,
+      createdAt: new Date().toISOString(),
+    });
+    if (action === "restaurar") {
+      requestApproveProduct(prodObj);
+    } else {
+      requestDeleteProduct(prodObj);
+    }
   };
 
   const requestConfirmPayment = (pay: MerchantPayment) => {
@@ -1272,7 +1366,9 @@ export const AdminApp: React.FC = () => {
     const pendingAccounts = users.filter(
       (u) => u.isApproved === false && u.role !== "cliente" && u.approvalStatus !== "rejeitado"
     ).length;
-    const pendingProducts = products.filter((p) => p.isApproved === false).length;
+    const pendingProducts = products.filter(
+      (p) => p.isApproved === false || p.moderationStatus === "em_revisao"
+    ).length;
     const pendingPayments =
       payments.filter((p) => p.status === "pendente").length +
       courierFees.filter((f) => f.status === "pendente").length;
@@ -1626,6 +1722,7 @@ export const AdminApp: React.FC = () => {
               onPreviewImage={setPreviewImageUrl}
               onApproveStore={(s) => requestApproveEntry({ kind: "loja", store: s })}
               onSuspendStore={requestSuspendStore}
+              onVerifyStore={requestVerifyStore}
               onToggleVip={requestToggleVip}
             />
           )}
@@ -1636,6 +1733,7 @@ export const AdminApp: React.FC = () => {
               users={users}
               onApproveUser={(u) => requestApproveEntry({ kind: "utilizador", user: u })}
               onSuspendUser={requestSuspendUser}
+              onBanUser={requestBanUser}
             />
           )}
 
@@ -1677,7 +1775,11 @@ export const AdminApp: React.FC = () => {
           )}
 
           {activeTab === "denuncias" && (
-            <ReportsSection reports={reports} onResolveReport={requestResolveReport} />
+            <ReportsSection
+              reports={reports}
+              onResolveReport={requestResolveReport}
+              onModerateReportedProduct={requestModerateReportedProduct}
+            />
           )}
 
           {activeTab === "configuracoes" && (

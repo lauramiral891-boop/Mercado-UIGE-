@@ -220,6 +220,24 @@ export function translateErrorMessage(
     return raw;
   }
 
+  if (
+    msg.includes("banida") ||
+    msg.includes("suspensa") ||
+    msg.includes("limite diário") ||
+    msg.includes("whatsapp") ||
+    msg.includes("pelo menos 1 fotografia") ||
+    msg.includes("conteúdo proibido") ||
+    msg.includes("termo") ||
+    msg.includes("já denunciaste") ||
+    msg.includes("indica o motivo") ||
+    msg.includes("bairro no uíge") ||
+    msg.includes("nome do artigo é obrigatório") ||
+    msg.includes("preço do artigo") ||
+    msg.includes("encomenda entregue")
+  ) {
+    return raw;
+  }
+
   if (msg.includes("duplicate") || msg.includes("already exists") || msg.includes("unique")) {
     return "Este registo já foi enviado.";
   }

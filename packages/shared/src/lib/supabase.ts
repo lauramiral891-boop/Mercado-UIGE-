@@ -29,6 +29,7 @@ export interface OtpRegisterMetadata {
   telefone?: string;
   bi_numero?: string;
   reside_uige?: boolean;
+  termos_aceites_em?: string;
 }
 
 /**
@@ -187,6 +188,7 @@ export async function signUpWithPassword(
         telefone: metadata?.telefone?.trim() || undefined,
         bi_numero: metadata?.bi_numero?.trim() || undefined,
         reside_uige: metadata?.reside_uige ?? true,
+        termos_aceites_em: metadata?.termos_aceites_em || undefined,
       },
     },
   });

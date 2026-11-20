@@ -78,6 +78,7 @@ import {
   productReviewRepo,
   notificationRepo,
   reportRepo,
+  userBlockRepo,
   adRepo,
   paymentRepo,
   deliveryRepo,
@@ -129,6 +130,8 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
   const [location, setLocation] = useState("Uíge, Centro da Cidade");
   const [showLocationModal, setShowLocationModal] = useState(false);
   const [showPrivacyModal, setShowPrivacyModal] = useState(false);
+  const [privacyInitialTab, setPrivacyInitialTab] = useState<"privacidade" | "termos" | "eliminacao">("privacidade");
+  const [blockedSellerIds, setBlockedSellerIds] = useState<string[]>([]);
 
   // Core Data
   const [products, setProducts] = useState<Product[]>([]);
@@ -419,18 +422,38 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
 
       setProducts(prods);
       setStores(sts);
-      setUser(currentUser);
       setAds(activeAds);
       setSystemConfig(cfg);
 
-      if (currentUser) {
+      if (currentUser?.isBanned) {
+        if (isSupabaseConfigured) {
+          try {
+            await supabase.auth.signOut();
+          } catch {}
+        }
+        saveCurrentUser(null);
+        setUser(null);
+        setBlockedSellerIds([]);
+        setOrders([]);
+        setStoreOrders([]);
+        setMyAds([]);
+        setMyPayments([]);
+        setDeliveries([]);
+        setCourierFees([]);
+        showToast(
+          currentUser.banReason
+            ? `Conta banida: ${currentUser.banReason}`
+            : "A tua conta foi banida pela moderação do Mercado Uíge."
+        );
+      } else if (currentUser) {
+        setUser(currentUser);
         setCheckoutAddress(
           `${currentUser.bairro ? currentUser.bairro + ", " : ""}${currentUser.municipality || "Uíge"}`
         );
         setCheckoutPhone(currentUser.phone || "");
 
         const userStore = sts.find((s) => s.ownerId === currentUser.id) || null;
-        const [userOrders, notifs, allUserAds, userPayments, allDeliv, fees] = await Promise.all([
+        const [userOrders, notifs, allUserAds, userPayments, allDeliv, fees, blockedIds] = await Promise.all([
           orderRepo.getAll(currentUser.id),
           notificationRepo.getAll(currentUser.id),
           adRepo.getAll(true),
@@ -441,6 +464,7 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
           currentUser.role === "entregador"
             ? deliveryRepo.getMonthlyFees(currentUser.id)
             : Promise.resolve([]),
+          userBlockRepo.getBlockedIds(currentUser.id),
         ]);
 
         setOrders(userOrders);
@@ -449,6 +473,7 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
         setMyPayments(userPayments);
         setDeliveries(allDeliv);
         setCourierFees(fees);
+        setBlockedSellerIds(blockedIds);
 
         if (userStore) {
           const sOrders = await orderRepo.getAll(undefined, userStore.id);
@@ -457,6 +482,8 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
           setStoreOrders([]);
         }
       } else {
+        setUser(null);
+        setBlockedSellerIds([]);
         const publicNotifs = await notificationRepo.getAll();
         setNotifications(publicNotifs.filter((n) => n.userId === "all"));
         setOrders([]);
@@ -493,6 +520,7 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
       } else if (event === "SIGNED_OUT") {
         saveCurrentUser(null);
         setUser(null);
+        setBlockedSellerIds([]);
       }
     });
     return () => {
@@ -712,13 +740,24 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
     return Array.from(map.values());
   }, [detailedCart, stores]);
 
+  const isProductPubliclyVisible = (p: Product): boolean => {
+    if (p.isApproved === false) return false;
+    if (p.moderationStatus === "em_revisao" || p.moderationStatus === "removido") return false;
+    if (p.sellerId && blockedSellerIds.includes(p.sellerId)) return false;
+    if (p.storeId) {
+      const st = stores.find((s) => s.id === p.storeId);
+      if (st && (st.isSuspended || blockedSellerIds.includes(st.ownerId))) return false;
+    }
+    return true;
+  };
+
   const publicProducts = useMemo(() => {
-    return products.filter((p) => p.isApproved !== false);
-  }, [products]);
+    return products.filter(isProductPubliclyVisible);
+  }, [products, stores, blockedSellerIds]);
 
   const favoriteProducts = useMemo(() => {
-    return products.filter((p) => favorites.includes(p.id));
-  }, [products, favorites]);
+    return publicProducts.filter((p) => favorites.includes(p.id));
+  }, [publicProducts, favorites]);
 
   const usedProducts = useMemo(() => {
     return publicProducts.filter((p) => {
@@ -731,9 +770,13 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
   }, [publicProducts, usedStoreTypeFilter]);
 
   const filteredStores = useMemo(() => {
-    if (storeTypeFilter === "todos") return stores;
-    return stores.filter((s) => s.storeType === storeTypeFilter);
-  }, [stores, storeTypeFilter]);
+    return stores.filter((s) => {
+      if (s.isSuspended) return false;
+      if (blockedSellerIds.includes(s.ownerId)) return false;
+      if (storeTypeFilter !== "todos" && s.storeType !== storeTypeFilter) return false;
+      return true;
+    });
+  }, [stores, storeTypeFilter, blockedSellerIds]);
 
   const myStore = useMemo(() => {
     if (!user) return null;
@@ -747,6 +790,12 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
         setPublishModalOpen(true);
       } else if (action === "want_to_sell") {
         setWantToSellModalOpen(true);
+      } else if (action === "banned") {
+        showToast(
+          user?.banReason
+            ? `Conta impedida de publicar: ${user.banReason}`
+            : "A tua conta ou loja está temporariamente impedida de publicar."
+        );
       } else {
         setAuthModalMode("login");
         setAuthModalOpen(true);
@@ -829,7 +878,7 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
         availableOnly: activeFilters.available,
         personalization: getLocalPersonalizationSignals(),
       });
-      setSearchResults(results.filter((p) => p.isApproved !== false));
+      setSearchResults(results.filter(isProductPubliclyVisible));
     } catch (err: unknown) {
       showToast(translateErrorMessage(err, "Não foi possível pesquisar agora. Tenta novamente."));
     } finally {
@@ -1080,6 +1129,69 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
     setProductReviews((prev) => [created, ...prev.filter((r) => r.userId !== user.id)]);
     showToast("Avaliação do artigo publicada ✓");
     await loadData();
+  };
+
+  const handleToggleBlockSeller = async (sellerId: string) => {
+    if (!sellerId) return;
+    if (!user) {
+      setAuthModalMode("login");
+      setAuthModalOpen(true);
+      showToast("Inicia sessão para bloquear um vendedor.");
+      return;
+    }
+    if (sellerId === user.id) {
+      showToast("Não podes bloquear a tua própria conta.");
+      return;
+    }
+    const isCurrentlyBlocked = blockedSellerIds.includes(sellerId);
+    try {
+      if (isCurrentlyBlocked) {
+        await userBlockRepo.unblock(user.id, sellerId);
+        setBlockedSellerIds((prev) => prev.filter((id) => id !== sellerId));
+        showToast("Vendedor desbloqueado ✓");
+      } else {
+        await userBlockRepo.block(user.id, sellerId);
+        setBlockedSellerIds((prev) => (prev.includes(sellerId) ? prev : [...prev, sellerId]));
+        if (selectedProduct && (selectedProduct.sellerId === sellerId || stores.find((s) => s.id === selectedProduct.storeId)?.ownerId === sellerId)) {
+          setSelectedProduct(null);
+        }
+        if (selectedStore && selectedStore.ownerId === sellerId) {
+          setSelectedStore(null);
+          navigateTo("home");
+        }
+        showToast("Vendedor bloqueado. Os artigos desta conta foram ocultados.");
+      }
+    } catch (err: unknown) {
+      showToast(translateErrorMessage(err, "Não foi possível actualizar o bloqueio."));
+    }
+  };
+
+  const handleReportReview = async (
+    reviewId: string,
+    reviewType: "loja" | "produto",
+    reason: string
+  ) => {
+    if (!user) {
+      setAuthModalMode("login");
+      setAuthModalOpen(true);
+      showToast("Inicia sessão para denunciar um comentário.");
+      return;
+    }
+    try {
+      await reportRepo.create({
+        reporterId: user.id,
+        reviewId,
+        reviewType,
+        storeId: reviewType === "loja" ? selectedStore?.id : selectedProduct?.storeId,
+        storeName: reviewType === "loja" ? selectedStore?.name : selectedProduct?.storeName,
+        productId: reviewType === "produto" ? selectedProduct?.id : undefined,
+        productName: reviewType === "produto" ? selectedProduct?.name : undefined,
+        reason: reason.trim(),
+      });
+      showToast("Denúncia sobre a avaliação enviada para análise ✓");
+    } catch (err: unknown) {
+      showToast(translateErrorMessage(err, "Não foi possível enviar a denúncia."));
+    }
   };
 
   // Direct Message to Seller
@@ -1565,13 +1677,16 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
           <StoreDetailView
             store={selectedStore}
             products={publicProducts}
-            reviews={storeReviews}
+            reviews={storeReviews.filter((r) => !blockedSellerIds.includes(r.userId))}
             stats={storeStats}
             orders={orders}
             currentUser={user}
             favorites={favorites}
             isFollowing={isFollowingStore}
             followersCount={storeFollowersCount}
+            isSellerBlocked={blockedSellerIds.includes(selectedStore.ownerId)}
+            onToggleBlockSeller={() => handleToggleBlockSeller(selectedStore.ownerId)}
+            onReportReview={handleReportReview}
             onBack={() => navigateTo("stores")}
             onToggleFollow={handleToggleFollowStore}
             onToggleFavorite={handleToggleFavorite}
@@ -2313,7 +2428,10 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
                 <div className="p-4 rounded-3xl border space-y-2 text-xs font-bold" style={{ backgroundColor: "var(--surface)", borderColor: "var(--border)" }}>
                   <button
                     type="button"
-                    onClick={() => setShowPrivacyModal(true)}
+                    onClick={() => {
+                      setPrivacyInitialTab("privacidade");
+                      setShowPrivacyModal(true);
+                    }}
                     className="w-full flex items-center justify-between p-2.5 rounded-xl border hover:border-[#246BFD] cursor-pointer"
                     style={{ borderColor: "var(--border)" }}
                   >
@@ -2407,6 +2525,10 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
         isOpen={authModalOpen}
         onClose={() => setAuthModalOpen(false)}
         initialMode={authModalMode}
+        onOpenTerms={() => {
+          setPrivacyInitialTab("termos");
+          setShowPrivacyModal(true);
+        }}
         onSuccess={(u) => {
           setUser(u);
           loadData();
@@ -2419,6 +2541,7 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
         onClose={() => setPublishModalOpen(false)}
         user={user}
         myStore={myStore}
+        myProducts={myProducts}
         categories={categories}
         systemConfig={systemConfig}
         onPublished={async () => {
@@ -2454,10 +2577,20 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
             ? stores.find((s) => s.id === selectedProduct.storeId) || null
             : null
         }
-        productReviews={productReviews}
+        productReviews={productReviews.filter((r) => !blockedSellerIds.includes(r.userId))}
         orders={orders}
         currentUser={user}
         onSubmitProductReview={handleSubmitProductReview}
+        isSellerBlocked={Boolean(
+          selectedProduct &&
+            (blockedSellerIds.includes(selectedProduct.sellerId || "") ||
+              (selectedProduct.storeId &&
+                blockedSellerIds.includes(
+                  stores.find((s) => s.id === selectedProduct.storeId)?.ownerId || ""
+                )))
+        )}
+        onToggleBlockSeller={handleToggleBlockSeller}
+        onReportReview={handleReportReview}
         onRequireAuth={() => {
           setSelectedProduct(null);
           setAuthModalMode("login");
@@ -2499,6 +2632,7 @@ export const MobileApp: React.FC<{ initialBooted?: boolean }> = ({ initialBooted
 
       <PrivacyPolicyModal
         isOpen={showPrivacyModal}
+        initialTab={privacyInitialTab}
         onClose={() => setShowPrivacyModal(false)}
         isLoggedIn={Boolean(user)}
         onDeleteAccountRequested={handleDeleteAccount}

@@ -5,6 +5,7 @@ export * from "./lib/imageCompression";
 export * from "./lib/mediaCompression";
 export * from "./lib/adDelivery";
 export * from "./lib/storefront";
+export * from "./lib/moderation";
 export * from "./lib/nativePlugins";
 export * from "./lib/storage";
 export * from "./lib/observability";

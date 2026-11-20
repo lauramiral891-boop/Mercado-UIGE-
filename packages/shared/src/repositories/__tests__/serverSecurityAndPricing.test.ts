@@ -486,6 +486,9 @@ describe("Migração 20250105 — Bloqueios Admin, Papéis de Equipa e Centro de
       name: "Fuba de Bombó 10Kg",
       price: 7500,
       stock: 10,
+      whatsapp: "923000999",
+      bairro: "Mbemba Ngango",
+      image: "https://cdn.uige.ao/fuba.jpg",
     });
     saveProducts([prod]);
 

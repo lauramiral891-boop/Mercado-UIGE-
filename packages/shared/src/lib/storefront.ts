@@ -169,8 +169,18 @@ export function buildStoreWhatsAppChatUrl(phone?: string | null, storeName?: str
 }
 
 /**
- * Indica se a loja tem direito ao selo oficial "Loja verificada" (apenas aprovada pelo admin).
+ * Indica se a loja tem direito ao selo oficial "Loja verificada" (atribuído exclusivamente pelo admin via `verificada`).
  */
-export function isStoreVerified(store?: Pick<Store, "isApproved" | "isSuspended"> | null): boolean {
-  return Boolean(store && store.isApproved === true && !store.isSuspended);
+export function isStoreVerified(store?: Pick<Store, "verified" | "isSuspended"> | null): boolean {
+  return Boolean(store && store.verified === true && !store.isSuspended);
+}
+
+/**
+ * Rótulo oficial de verificação da loja:
+ * "Loja verificada" apenas quando verificada pelo admin; caso contrário, "Vendedor não verificado".
+ */
+export function getStoreVerificationLabel(
+  store?: Pick<Store, "verified" | "isSuspended"> | null
+): "Loja verificada" | "Vendedor não verificado" {
+  return isStoreVerified(store) ? "Loja verificada" : "Vendedor não verificado";
 }

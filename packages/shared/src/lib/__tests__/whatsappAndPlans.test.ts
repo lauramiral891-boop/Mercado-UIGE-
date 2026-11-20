@@ -153,6 +153,9 @@ describe("Encomendas via WhatsApp, Fallback Admin, Pagamento e Planos por Tipo",
       name: "Camisa Social",
       price: 8000,
       stock: 5,
+      whatsapp: "923100200",
+      bairro: "Centro da Cidade",
+      image: "https://cdn.uige.ao/camisa.jpg",
     });
 
     const created = await orderRepo.create({

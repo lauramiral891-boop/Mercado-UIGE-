@@ -51,6 +51,7 @@ import {
   AppErrorRecord,
   SystemHealthMetrics,
   NocServiceCheck,
+  UserBlock,
 } from "../../types";
 import {
   IProductRepo,
@@ -58,6 +59,7 @@ import {
   IMessageRepo,
   IUserRepo,
   IStoreRepo,
+  IUserBlockRepo,
   IStoreFollowerRepo,
   IStoreReviewRepo,
   IProductReviewRepo,
@@ -79,6 +81,7 @@ import {
   OfflineMessageRepo,
   OfflineUserRepo,
   OfflineStoreRepo,
+  OfflineUserBlockRepo,
   OfflineStoreFollowerRepo,
   OfflineStoreReviewRepo,
   OfflineProductReviewRepo,
@@ -96,12 +99,19 @@ import {
   syncQueue,
 } from "../offline";
 import { allowTelemetryWrite, sanitizeTelemetryText } from "../../lib/observability";
+import {
+  DEFAULT_ESTABLISHED_ACCOUNT_DAILY_LIMIT,
+  DEFAULT_NEW_ACCOUNT_DAILY_LIMIT,
+  DEFAULT_PROHIBITED_KEYWORDS,
+  parseProhibitedKeywordsList,
+} from "../../lib/moderation";
 
 const fallbackProductRepo = new OfflineProductRepo();
 const fallbackOrderRepo = new OfflineOrderRepo();
 const fallbackMessageRepo = new OfflineMessageRepo();
 const fallbackUserRepo = new OfflineUserRepo();
 const fallbackStoreRepo = new OfflineStoreRepo();
+const fallbackUserBlockRepo = new OfflineUserBlockRepo();
 const fallbackStoreFollowerRepo = new OfflineStoreFollowerRepo();
 const fallbackStoreReviewRepo = new OfflineStoreReviewRepo();
 const fallbackProductReviewRepo = new OfflineProductReviewRepo();
@@ -137,7 +147,12 @@ function mapProductRow(row: any): Product {
     province: row.provincia || "Uíge",
     municipality: row.municipio || "Uíge",
     bairro: row.bairro,
+    whatsapp: row.whatsapp || undefined,
     isApproved: row.is_aprovado,
+    moderationStatus:
+      row.estado_moderacao || (row.is_aprovado === false ? "em_revisao" : "publicado"),
+    moderationReason: row.motivo_moderacao || null,
+    reportsCount: Number(row.total_denuncias || 0),
     isFeatured: row.is_destaque,
     sales: row.vendas || 0,
     rating: Number(row.classificacao || 0),
@@ -243,7 +258,7 @@ export class SupabaseProductRepo implements IProductRepo {
     }
 
     try {
-      const { data, error } = await supabase
+      let result = await supabase
         .from("produtos")
         .insert({
           loja_id: product.storeId || null,
@@ -261,18 +276,44 @@ export class SupabaseProductRepo implements IProductRepo {
           video_url: product.videoUrl || null,
           tipo_media: product.mediaType || (product.videoUrl ? "video" : "imagem"),
           municipio: product.municipality || "Uíge",
+          bairro: product.bairro || null,
+          whatsapp: product.whatsapp || null,
         })
         .select("*, lojas(nome, codigo, tipo_loja, classificacao, is_vip)")
         .single();
 
-      if (error || !data) {
+      if (result.error && (result.error.code === "42703" || result.error.code === "PGRST204")) {
+        result = await supabase
+          .from("produtos")
+          .insert({
+            loja_id: product.storeId || null,
+            vendedor_id: product.sellerId,
+            nome: product.name,
+            descricao: product.description || "",
+            preco: product.price,
+            preco_antigo: product.oldPrice || null,
+            stock: product.stock ?? 1,
+            categoria: product.categoryName || "Electrónicos",
+            marca: product.brand || "Oficial",
+            condicao: product.condition || "novo",
+            imagem_url: product.image || "",
+            imagens: product.images || [],
+            video_url: product.videoUrl || null,
+            tipo_media: product.mediaType || (product.videoUrl ? "video" : "imagem"),
+            municipio: product.municipality || "Uíge",
+          })
+          .select("*, lojas(nome, codigo, tipo_loja, classificacao, is_vip)")
+          .single();
+      }
+
+      if (result.error || !result.data) {
         throw createCodedError(
-          error || "Não foi possível publicar o artigo no servidor.",
+          result.error || "Não foi possível publicar o artigo no servidor.",
           "Não foi possível publicar o artigo no servidor."
         );
       }
 
-      const mapped = mapProductRow(data);
+      const mapped = mapProductRow(result.data);
       if (product.id) {
         syncQueue.markProcessed(product.id);
       }
@@ -316,8 +357,50 @@ export class SupabaseProductRepo implements IProductRepo {
     await fallbackProductRepo.approve(id, isApproved);
     if (!isSupabaseConfigured) return;
     try {
-      await supabase.from("produtos").update({ is_aprovado: isApproved }).eq("id", id);
+      await supabase
+        .from("produtos")
+        .update({
+          is_aprovado: isApproved,
+          estado_moderacao: isApproved ? "publicado" : "em_revisao",
+          ...(isApproved ? { motivo_moderacao: null } : {}),
+        })
+        .eq("id", id);
     } catch {}
+  }
+
+  async moderateProduct(
+    id: string,
+    action: "restaurar" | "remover" | "suspender",
+    reason?: string
+  ): Promise<void> {
+    if (isSupabaseConfigured) {
+      const { error } = await supabase.rpc("admin_moderar_produto", {
+        p_produto_id: id,
+        p_acao: action,
+        p_motivo: reason?.trim() || null,
+      });
+      if (error) {
+        if (error.code === "42883" || error.code === "PGRST202") {
+          if (action === "remover") {
+            const del = await supabase.from("produtos").delete().eq("id", id);
+            if (del.error) throw createCodedError(del.error);
+          } else {
+            const upd = await supabase
+              .from("produtos")
+              .update({
+                is_aprovado: action === "restaurar",
+                estado_moderacao: action === "restaurar" ? "publicado" : "em_revisao",
+                motivo_moderacao: action === "restaurar" ? null : reason?.trim() || null,
+              })
+              .eq("id", id);
+            if (upd.error) throw createCodedError(upd.error);
+          }
+        } else {
+          throw createCodedError(error, "Não foi possível moderar o artigo.");
+        }
+      }
+    }
+    await fallbackProductRepo.moderateProduct(id, action, reason);
   }
 }
 
@@ -576,7 +659,11 @@ export class SupabaseUserRepo implements IUserRepo {
       rejectionReason: u.motivo_rejeicao || null,
       correctionNote: u.nota_correcao || null,
       walletBalance: 0,
-      isSuspended: u.suspenso,
+      isSuspended: Boolean(u.suspenso),
+      isBanned: Boolean(u.banido),
+      banReason: u.motivo_banimento || null,
+      bannedAt: u.banido_em || null,
+      termsAcceptedAt: u.termos_aceites_em || null,
       isVerified: verified,
       planType: u.plano_tipo || "gratis",
       planExpiresAt: u.plano_expira_em || null,
@@ -681,6 +768,33 @@ export class SupabaseUserRepo implements IUserRepo {
     await fallbackUserRepo.suspendUser(id, isSuspended);
   }
 
+  async banUser(id: string, isBanned: boolean, reason?: string): Promise<void> {
+    if (isSupabaseConfigured) {
+      const { error } = await supabase.rpc("admin_banir_utilizador", {
+        p_user_id: id,
+        p_banir: isBanned,
+        p_motivo: reason?.trim() || null,
+      });
+      if (error) {
+        if (error.code === "42883" || error.code === "PGRST202") {
+          const upd = await supabase
+            .from("perfis")
+            .update({
+              banido: isBanned,
+              suspenso: isBanned,
+              motivo_banimento: isBanned ? reason?.trim() || null : null,
+              banido_em: isBanned ? new Date().toISOString() : null,
+            })
+            .eq("id", id);
+          if (upd.error) throw createCodedError(upd.error);
+        } else {
+          throw createCodedError(error, "Não foi possível alterar o estado de banimento.");
+        }
+      }
+    }
+    await fallbackUserRepo.banUser(id, isBanned, reason);
+  }
+
   async setRole(id: string, role: UserRole): Promise<void> {
     if (isSupabaseConfigured) {
       const { error } = await supabase.from("perfis").update({ papel: role }).eq("id", id);
@@ -754,12 +868,13 @@ export class SupabaseStoreRepo implements IStoreRepo {
       biPhotoUrl: s.foto_bi_url,
       logo: s.logo_url || s.foto_fachada_url || "",
       cover: s.capa_url,
-      isApproved: s.is_aprovada,
-      approvalStatus: s.estado_aprovacao || (s.is_aprovada ? "aprovado" : "pendente"),
+      isApproved: s.is_aprovada ?? true,
+      approvalStatus: s.estado_aprovacao || (s.is_aprovada === false ? "pendente" : "aprovado"),
       rejectionReason: s.motivo_rejeicao || null,
       correctionNote: s.nota_correcao || null,
       isSuspended: Boolean(s.suspensa),
       suspensionReason: s.motivo_suspensao,
+      verified: Boolean(s.verificada),
       isVip: s.is_vip,
       planType: s.plano_tipo || "gratis",
       planExpiresAt: s.plano_expira_em,
@@ -987,6 +1102,25 @@ export class SupabaseStoreRepo implements IStoreRepo {
     await fallbackStoreRepo.suspendStore(id, isSuspended, reason);
   }
 
+  async verifyStore(id: string, verified: boolean, reason?: string): Promise<void> {
+    if (isSupabaseConfigured) {
+      const { error } = await supabase.rpc("admin_verificar_loja", {
+        p_loja_id: id,
+        p_verificada: verified,
+        p_motivo: reason?.trim() || null,
+      });
+      if (error) {
+        if (error.code === "42883" || error.code === "PGRST202") {
+          const upd = await supabase.from("lojas").update({ verificada: verified }).eq("id", id);
+          if (upd.error) throw createCodedError(upd.error);
+        } else {
+          throw createCodedError(error, "Não foi possível alterar o selo de verificação da loja.");
+        }
+      }
+    }
+    await fallbackStoreRepo.verifyStore(id, verified);
+  }
+
   async setPlan(id: string, planType: PlanType, durationDays = 30): Promise<void> {
     const expiresAt = planType === "gratis" ? null : new Date(Date.now() + durationDays * 86400000).toISOString();
     if (isSupabaseConfigured) {
@@ -997,6 +1131,77 @@ export class SupabaseStoreRepo implements IStoreRepo {
       if (error) throw error;
     }
     await fallbackStoreRepo.setPlan(id, planType, durationDays);
+  }
+}
+
+// 5A. SUPABASE BLOQUEIOS DE UTILIZADORES / VENDEDORES
+export class SupabaseUserBlockRepo implements IUserBlockRepo {
+  private mapRow(b: any): UserBlock {
+    return {
+      id: b.id,
+      blockerId: b.bloqueador_id,
+      blockedId: b.bloqueado_id,
+      reason: b.motivo || null,
+      createdAt: b.criado_em,
+    };
+  }
+
+  async getAll(blockerId?: string): Promise<UserBlock[]> {
+    if (!isSupabaseConfigured) return fallbackUserBlockRepo.getAll(blockerId);
+    try {
+      let query = supabase.from("bloqueios_utilizador").select("*").order("criado_em", { ascending: false });
+      if (blockerId) query = query.eq("bloqueador_id", blockerId);
+      const { data, error } = await query;
+      if (error || !data) return fallbackUserBlockRepo.getAll(blockerId);
+      return data.map((b: any) => this.mapRow(b));
+    } catch {
+      return fallbackUserBlockRepo.getAll(blockerId);
+    }
+  }
+
+  async getBlockedIds(blockerId: string): Promise<string[]> {
+    if (!blockerId) return [];
+    const list = await this.getAll(blockerId);
+    return list.map((b) => b.blockedId);
+  }
+
+  async isBlocked(blockerId: string, blockedId: string): Promise<boolean> {
+    const ids = await this.getBlockedIds(blockerId);
+    return ids.includes(blockedId);
+  }
+
+  async block(blockerId: string, blockedId: string, reason?: string): Promise<UserBlock> {
+    const local = await fallbackUserBlockRepo.block(blockerId, blockedId, reason);
+    if (!isSupabaseConfigured) return local;
+    const { data, error } = await supabase
+      .from("bloqueios_utilizador")
+      .upsert(
+        {
+          bloqueador_id: blockerId,
+          bloqueado_id: blockedId,
+          motivo: reason?.trim() || null,
+        },
+        { onConflict: "bloqueador_id,bloqueado_id" }
+      )
+      .select()
+      .single();
+    if (error) {
+      throw createCodedError(error, "Não foi possível bloquear o vendedor.");
+    }
+    return data ? this.mapRow(data) : local;
+  }
+
+  async unblock(blockerId: string, blockedId: string): Promise<void> {
+    await fallbackUserBlockRepo.unblock(blockerId, blockedId);
+    if (!isSupabaseConfigured) return;
+    const { error } = await supabase
+      .from("bloqueios_utilizador")
+      .delete()
+      .eq("bloqueador_id", blockerId)
+      .eq("bloqueado_id", blockedId);
+    if (error) {
+      throw createCodedError(error, "Não foi possível desbloquear o vendedor.");
+    }
   }
 }
 
@@ -1331,7 +1536,7 @@ export class SupabaseNotificationRepo implements INotificationRepo {
   }
 }
 
-// 7. SUPABASE DENÚNCIAS (Produtos e Lojas)
+// 7. SUPABASE DENÚNCIAS (Produtos, Lojas e Avaliações)
 export class SupabaseReportRepo implements IReportRepo {
   async getAll(): Promise<ReportItem[]> {
     if (!isSupabaseConfigured) return fallbackReportRepo.getAll();
@@ -1344,10 +1549,12 @@ export class SupabaseReportRepo implements IReportRepo {
       return data.map((r: any) => ({
         id: r.id,
         reporterId: r.denunciante_id || "anon",
-        productId: r.produto_id,
+        productId: r.produto_id || undefined,
         productName: r.produtos?.nome || undefined,
-        storeId: r.loja_id,
+        storeId: r.loja_id || undefined,
         storeName: r.lojas?.nome || undefined,
+        reviewId: r.avaliacao_id || undefined,
+        reviewType: r.avaliacao_tipo || undefined,
         reason: r.motivo,
         status: r.estado,
         createdAt: r.criado_em,
@@ -1361,30 +1568,60 @@ export class SupabaseReportRepo implements IReportRepo {
     const local = await fallbackReportRepo.create(report);
     if (!isSupabaseConfigured) return local;
     try {
-      const { data, error } = await supabase
+      let { data, error } = await supabase
         .from("denuncias")
         .insert({
           denunciante_id: report.reporterId || null,
           produto_id: report.productId || null,
           loja_id: report.storeId || null,
+          avaliacao_id: report.reviewId || null,
+          avaliacao_tipo: report.reviewType || null,
           motivo: report.reason || "Irregularidade reportada",
           estado: "pendente",
         })
         .select()
         .single();
-      if (error || !data) return local;
+
+      if (error && (error.code === "42703" || error.code === "PGRST204")) {
+        const retry = await supabase
+          .from("denuncias")
+          .insert({
+            denunciante_id: report.reporterId || null,
+            produto_id: report.productId || null,
+            loja_id: report.storeId || null,
+            motivo: report.reason || "Irregularidade reportada",
+            estado: "pendente",
+          })
+          .select()
+          .single();
+        data = retry.data;
+        error = retry.error;
+      }
+
+      if (error) {
+        if (error.code === "23505") {
+          throw new Error("Já denunciaste este registo anteriormente.");
+        }
+        return local;
+      }
+      if (!data) return local;
       return {
         id: data.id,
         reporterId: data.denunciante_id || "anon",
-        productId: data.produto_id,
+        productId: data.produto_id || undefined,
         productName: report.productName,
-        storeId: data.loja_id,
+        storeId: data.loja_id || undefined,
         storeName: report.storeName,
+        reviewId: data.avaliacao_id || report.reviewId,
+        reviewType: data.avaliacao_tipo || report.reviewType,
         reason: data.motivo,
         status: data.estado,
         createdAt: data.criado_em,
       };
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Já denunciaste")) {
+        throw err;
+      }
       return local;
     }
   }
@@ -2213,6 +2450,18 @@ export class SupabaseSystemConfigRepo implements ISystemConfigRepo {
         courierBasicPrice: Number(data.preco_plano_entregador_basico ?? 3000),
         courierVipPrice: Number(data.preco_plano_entregador_vip ?? 8000),
         requireProductApproval: Boolean(data.exigir_aprovacao_produtos ?? false),
+        newAccountDailyLimit: Math.max(
+          1,
+          Number(data.limite_diario_conta_nova ?? DEFAULT_NEW_ACCOUNT_DAILY_LIMIT)
+        ),
+        establishedAccountDailyLimit: Math.max(
+          1,
+          Number(data.limite_diario_conta_estabelecida ?? DEFAULT_ESTABLISHED_ACCOUNT_DAILY_LIMIT)
+        ),
+        prohibitedKeywords:
+          Array.isArray(data.palavras_proibidas) && data.palavras_proibidas.length > 0
+            ? parseProhibitedKeywordsList(data.palavras_proibidas)
+            : DEFAULT_PROHIBITED_KEYWORDS,
         maintenanceMode: Boolean(data.modo_manutencao ?? false),
         maintenanceMessage:
           data.mensagem_manutencao ||
@@ -2232,6 +2481,21 @@ export class SupabaseSystemConfigRepo implements ISystemConfigRepo {
     const merged: SystemConfig = {
       ...current,
       ...updates,
+      newAccountDailyLimit:
+        updates.newAccountDailyLimit !== undefined
+          ? Math.max(1, Math.round(Number(updates.newAccountDailyLimit) || DEFAULT_NEW_ACCOUNT_DAILY_LIMIT))
+          : current.newAccountDailyLimit,
+      establishedAccountDailyLimit:
+        updates.establishedAccountDailyLimit !== undefined
+          ? Math.max(
+              1,
+              Math.round(Number(updates.establishedAccountDailyLimit) || DEFAULT_ESTABLISHED_ACCOUNT_DAILY_LIMIT)
+            )
+          : current.establishedAccountDailyLimit,
+      prohibitedKeywords:
+        updates.prohibitedKeywords !== undefined
+          ? parseProhibitedKeywordsList(updates.prohibitedKeywords)
+          : current.prohibitedKeywords,
       bannerDefaultDurationSec:
         updates.bannerDefaultDurationSec !== undefined
           ? clampBannerDurationSec(updates.bannerDefaultDurationSec, current.bannerDefaultDurationSec)
@@ -2259,6 +2523,9 @@ export class SupabaseSystemConfigRepo implements ISystemConfigRepo {
         preco_plano_entregador_vip: merged.courierVipPrice,
         banner_duracao_padrao_seg: merged.bannerDefaultDurationSec,
         banner_autoplay: merged.bannerAutoplay,
+        limite_diario_conta_nova: merged.newAccountDailyLimit,
+        limite_diario_conta_estabelecida: merged.establishedAccountDailyLimit,
+        palavras_proibidas: merged.prohibitedKeywords,
         actualizado_em: new Date().toISOString(),
       };
       if (updates.requireProductApproval !== undefined) {
@@ -2274,6 +2541,9 @@ export class SupabaseSystemConfigRepo implements ISystemConfigRepo {
       if (error && (error.code === "42703" || error.code === "PGRST204")) {
         delete payload.banner_duracao_padrao_seg;
         delete payload.banner_autoplay;
+        delete payload.limite_diario_conta_nova;
+        delete payload.limite_diario_conta_estabelecida;
+        delete payload.palavras_proibidas;
         const retry = await supabase.from("configuracoes_sistema").upsert(payload);
         error = retry.error;
       }

@@ -31,6 +31,7 @@ import {
   confirmPasswordResetWithOtp,
   validatePasswordPair,
   isSupabaseConfigured,
+  supabase,
   userRepo,
   translateErrorMessage,
 } from "@mercado-uige/shared";
@@ -40,6 +41,7 @@ interface AuthModalProps {
   onClose: () => void;
   initialMode?: "login" | "register" | "otp";
   onSuccess: (user: User) => void;
+  onOpenTerms?: () => void;
   showToast: (msg: string) => void;
 }
 
@@ -50,6 +52,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   onClose,
   initialMode = "login",
   onSuccess,
+  onOpenTerms,
   showToast,
 }) => {
   const mapInitialMode = (m: "login" | "register" | "otp"): AuthMode =>
@@ -68,6 +71,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [bairro, setBairro] = useState(getBairrosByMunicipality("Uíge")[0]);
   const [biNumber, setBiNumber] = useState("");
   const [resideConfirmed, setResideConfirmed] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
   const [otpCode, setOtpCode] = useState("");
   const [resendTimer, setResendTimer] = useState(0);
   const [error, setError] = useState("");
@@ -145,7 +149,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         bairro,
         biNumber: safeRole === "entregador" ? biNumber.trim() : null,
         residesInUigeConfirmed: true,
-        isApproved: safeRole === "cliente",
+        isApproved: safeRole !== "entregador",
+        termsAcceptedAt: new Date().toISOString(),
         walletBalance: 0,
         isVerified: true,
         createdAt: new Date().toISOString(),
@@ -159,6 +164,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         phone: phone.trim() || matched.phone,
         municipality: municipality || matched.municipality,
         bairro: bairro || matched.bairro,
+        termsAcceptedAt: matched.termsAcceptedAt || new Date().toISOString(),
       };
       saveUsers(users.map((u) => (u.id === matched!.id ? matched! : u)));
     }
@@ -200,6 +206,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       }
 
       const loggedUser = await resolveAndSyncProfile(cleanEmail, data?.user?.id, false);
+      if (loggedUser.isBanned) {
+        saveCurrentUser(null);
+        if (isSupabaseConfigured) {
+          await supabase.auth.signOut().catch(() => {});
+        }
+        setError(
+          loggedUser.banReason
+            ? `Conta banida: ${loggedUser.banReason}`
+            : "Esta conta foi banida por violar os Termos de Uso do Mercado Uíge."
+        );
+        return;
+      }
       onSuccess(loggedUser);
       showToast(`Bem-vindo de volta, ${(loggedUser.name || "").split(" ")[0] || "Cliente"}!`);
       onClose();
@@ -228,6 +246,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setError("Confirma que resides na província do Uíge para criar conta.");
       return;
     }
+    if (!termsAccepted) {
+      setError("Tens de aceitar os Termos de Uso do Mercado Uíge para criar conta.");
+      return;
+    }
     if (role === "entregador") {
       if (!biNumber.trim() || biNumber.trim().length < 6) {
         setError("Entregadores devem indicar o número do Bilhete de Identidade (BI).");
@@ -251,6 +273,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
     setLoading(true);
     try {
+      const acceptedAt = new Date().toISOString();
       const { data, error: signUpErr } = await signUpWithPassword(cleanEmail, password, {
         nome: name.trim(),
         papel: role,
@@ -260,6 +283,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         telefone: phone.trim() || undefined,
         bi_numero: role === "entregador" ? biNumber.trim() : undefined,
         reside_uige: resideConfirmed,
+        termos_aceites_em: acceptedAt,
       });
 
       if (signUpErr) {
@@ -272,8 +296,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         const createdUser = await resolveAndSyncProfile(cleanEmail, data.user.id, true);
         onSuccess(createdUser);
         showToast(
-          createdUser.role !== "cliente" && createdUser.isApproved === false
-            ? "Conta registada! Aguarda aprovação do administrador."
+          createdUser.role === "entregador" && createdUser.isApproved === false
+            ? "Conta de entregador registada! Aguarda aprovação do administrador."
             : `Bem-vindo ao Mercado Uíge, ${(createdUser.name || "").split(" ")[0] || "Cliente"}!`
         );
         onClose();
@@ -312,7 +336,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       const verifiedUser = await resolveAndSyncProfile(cleanEmail, data?.user?.id, true);
       onSuccess(verifiedUser);
       showToast(
-        verifiedUser.role !== "cliente" && verifiedUser.isApproved === false
+        verifiedUser.role === "entregador" && verifiedUser.isApproved === false
           ? "Conta confirmada! Aguarda aprovação do administrador."
           : `Bem-vindo ao Mercado Uíge, ${(verifiedUser.name || "").split(" ")[0] || "Cliente"}!`
       );
@@ -638,9 +662,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   </button>
                 ))}
               </div>
-              {(role === "comerciante" || role === "entregador") && (
+              {role === "entregador" && (
                 <p className="text-[11px] text-amber-400 font-semibold mt-1">
-                  Novas contas de {role === "comerciante" ? "comerciante" : "entregador"} passam por aprovação do administrador.
+                  Novas contas de entregador passam por aprovação do administrador.
                 </p>
               )}
             </div>
@@ -815,7 +839,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               </div>
             </div>
 
-            <label className="flex items-start gap-2.5 text-xs cursor-pointer pt-1 min-h-[44px]">
+            <label className="flex items-start gap-2.5 text-xs cursor-pointer pt-1 min-h-[40px]">
               <input
                 type="checkbox"
                 checked={resideConfirmed}
@@ -824,6 +848,31 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               />
               <span className="font-semibold leading-snug">
                 Confirmo que resido na província do Uíge (contas de outras províncias não são permitidas).
+              </span>
+            </label>
+
+            <label className="flex items-start gap-2.5 text-xs cursor-pointer min-h-[40px]">
+              <input
+                type="checkbox"
+                data-testid="terms-accept-checkbox"
+                checked={termsAccepted}
+                onChange={(e) => setTermsAccepted(e.target.checked)}
+                className="mt-0.5 shrink-0 w-4 h-4"
+              />
+              <span className="font-semibold leading-snug">
+                Li e aceito os{" "}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onOpenTerms?.();
+                  }}
+                  className="text-[#246BFD] underline font-black cursor-pointer"
+                >
+                  Termos de Uso
+                </button>{" "}
+                do Mercado Uíge (incluindo regras de publicação livre e itens proibidos). *
               </span>
             </label>
 

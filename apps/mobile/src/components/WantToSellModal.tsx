@@ -77,8 +77,10 @@ export const WantToSellModal: React.FC<WantToSellModalProps> = ({
   if (!isOpen || !user) return null;
 
   const effectiveStore = myStore || detectedStore;
-  const isPendingMerchant =
-    user.role === "comerciante" || Boolean(effectiveStore);
+  const isBlockedAccount = Boolean(
+    user.isBanned || user.isSuspended || effectiveStore?.isSuspended
+  );
+  const hasExistingStore = Boolean(effectiveStore) || isBlockedAccount;
 
   const handleImagePick = async (
     file: File,
@@ -105,6 +107,15 @@ export const WantToSellModal: React.FC<WantToSellModalProps> = ({
       return;
     }
 
+    if (user.isBanned || user.isSuspended || effectiveStore?.isSuspended) {
+      showToast(
+        user.banReason ||
+          effectiveStore?.suspensionReason ||
+          "A tua conta ou loja encontra-se impedida de publicar."
+      );
+      return;
+    }
+
     if (effectiveStore) {
       showToast("Já tens uma loja registada. A abrir a tua loja…");
       onClose();
@@ -114,6 +125,10 @@ export const WantToSellModal: React.FC<WantToSellModalProps> = ({
 
     if (!storeName.trim()) {
       showToast("Indica o nome da tua loja ou banca.");
+      return;
+    }
+    if (!phone.trim()) {
+      showToast("Indica o número de WhatsApp da loja para contacto.");
       return;
     }
     if (storeType === "loja_fixa") {
@@ -181,16 +196,18 @@ export const WantToSellModal: React.FC<WantToSellModalProps> = ({
         biPhotoUrl: biUrl,
         logo: facadeUrl || biUrl,
         phone: phone.trim(),
-        isApproved: false,
+        isApproved: true,
+        approvalStatus: "aprovado",
         clientMutationId: storeMutationIdRef.current,
       });
 
       storeMutationIdRef.current = null;
-      showToast("Pedido para vender enviado! Aguarda aprovação do administrador.");
+      showToast("Loja criada e activada! Já podes publicar artigos no Mercado Uíge ✓");
       await onSubmitted();
       onClose();
+      onGoToSeller();
     } catch (err: unknown) {
-      showToast(translateErrorMessage(err, "Não foi possível enviar o pedido de vendedor."));
+      showToast(translateErrorMessage(err, "Não foi possível criar a loja."));
     } finally {
       submitLockRef.current = false;
       setSubmitting(false);
@@ -226,53 +243,60 @@ export const WantToSellModal: React.FC<WantToSellModalProps> = ({
           </button>
         </div>
 
-        {isPendingMerchant ? (
+        {hasExistingStore ? (
           <div className="space-y-3 text-xs">
-            <div className="p-4 rounded-2xl border border-amber-500/40 bg-amber-500/10 space-y-2">
-              <div className="flex items-center gap-2 font-black text-amber-300">
-                {user.isSuspended || effectiveStore?.isSuspended ? (
-                  <ShieldAlert size={16} />
-                ) : (
-                  <Clock size={16} />
-                )}
+            <div
+              className={`p-4 rounded-2xl border space-y-2 ${
+                isBlockedAccount
+                  ? "border-red-500/40 bg-red-500/10"
+                  : "border-[#246BFD]/40 bg-[#246BFD]/10"
+              }`}
+            >
+              <div
+                className={`flex items-center gap-2 font-black ${
+                  isBlockedAccount ? "text-red-400" : "text-[#246BFD]"
+                }`}
+              >
+                {isBlockedAccount ? <ShieldAlert size={16} /> : <Clock size={16} />}
                 <span>
-                  {user.isSuspended || effectiveStore?.isSuspended
+                  {user.isBanned
+                    ? "Conta banida"
+                    : user.isSuspended || effectiveStore?.isSuspended
                     ? "Conta ou loja suspensa"
-                    : user.approvalStatus === "rejeitado" || effectiveStore?.approvalStatus === "rejeitado"
-                    ? "Registo de vendedor rejeitado"
-                    : user.approvalStatus === "correcao" || effectiveStore?.approvalStatus === "correcao"
-                    ? "Pedido necessita de correcção"
                     : effectiveStore
-                    ? `Loja registada: ${effectiveStore.name}`
-                    : "Registo como comerciante pendente de aprovação"}
+                    ? `Loja activa: ${effectiveStore.name}`
+                    : "Já tens perfil de vendedor"}
                 </span>
               </div>
               <p className="opacity-85 leading-relaxed">
-                {user.correctionNote ||
+                {user.banReason ||
+                  effectiveStore?.suspensionReason ||
+                  user.correctionNote ||
                   effectiveStore?.correctionNote ||
                   user.rejectionReason ||
                   effectiveStore?.rejectionReason ||
-                  effectiveStore?.suspensionReason ||
-                  "A nossa equipa está a validar os teus documentos. Assim que o administrador aprovar, poderás publicar artigos directamente no botão +."}
+                  "A tua loja já está pronta no Mercado Uíge. Podes publicar artigos directamente ou gerir o catálogo no Painel do Comerciante."}
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                onClose();
-                onGoToSeller();
-              }}
-              className="w-full py-3 rounded-2xl font-black text-xs text-slate-950 cursor-pointer"
-              style={{ backgroundColor: "var(--accent)" }}
-            >
-              Ver Painel do Comerciante
-            </button>
+            {!isBlockedAccount && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onGoToSeller();
+                }}
+                className="w-full py-3 rounded-2xl font-black text-xs text-slate-950 cursor-pointer"
+                style={{ backgroundColor: "var(--accent)" }}
+              >
+                Ver Painel do Comerciante
+              </button>
+            )}
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-3 text-xs">
             <p className="opacity-80 leading-relaxed">
-              Solicita a tua conta de comerciante para publicar produtos. O pedido fica pendente até aprovação do administrador.
+              Cria a tua loja no Mercado Uíge e começa a publicar artigos imediatamente. A activação é imediata (uma loja por utilizador), sujeita às regras da plataforma.
             </p>
 
             <div className="grid grid-cols-2 gap-2">
@@ -457,7 +481,7 @@ export const WantToSellModal: React.FC<WantToSellModalProps> = ({
               className="w-full py-3 rounded-2xl font-black text-sm text-slate-950 shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
               style={{ backgroundColor: "var(--accent)" }}
             >
-              {submitting ? "A guardar…" : "Enviar Pedido para Aprovação"}
+              {submitting ? "A guardar…" : "Criar Loja e Vender Agora"}
             </button>
           </form>
         )}

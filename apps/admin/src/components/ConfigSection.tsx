@@ -2,12 +2,17 @@ import React, { useEffect, useState } from "react";
 import { Settings, Shield, Users, Save } from "lucide-react";
 import {
   BANNER_DURATION_PRESETS,
+  DEFAULT_ESTABLISHED_ACCOUNT_DAILY_LIMIT,
+  DEFAULT_NEW_ACCOUNT_DAILY_LIMIT,
+  DEFAULT_PROHIBITED_KEYWORDS,
+  PROHIBITED_CATEGORY_EXAMPLES,
   SystemConfig,
   User,
   UserRole,
   clampBannerDurationSec,
   formatUserRole,
   isSuperAdminRole,
+  parseProhibitedKeywordsList,
 } from "@mercado-uige/shared";
 
 interface ConfigSectionProps {
@@ -26,11 +31,23 @@ export const ConfigSection: React.FC<ConfigSectionProps> = ({
   onRequestChangeRole,
 }) => {
   const [draft, setDraft] = useState<SystemConfig>(systemConfig);
+  const [keywordsText, setKeywordsText] = useState<string>(() =>
+    (systemConfig.prohibitedKeywords && systemConfig.prohibitedKeywords.length > 0
+      ? systemConfig.prohibitedKeywords
+      : DEFAULT_PROHIBITED_KEYWORDS
+    ).join(", ")
+  );
   const [roleSearch, setRoleSearch] = useState("");
   const isSuperAdmin = isSuperAdminRole(currentUser.role);
 
   useEffect(() => {
     setDraft(systemConfig);
+    setKeywordsText(
+      (systemConfig.prohibitedKeywords && systemConfig.prohibitedKeywords.length > 0
+        ? systemConfig.prohibitedKeywords
+        : DEFAULT_PROHIBITED_KEYWORDS
+      ).join(", ")
+    );
   }, [systemConfig]);
 
   const teamAndCandidates = users.filter((u) => {
@@ -203,25 +220,79 @@ export const ConfigSection: React.FC<ConfigSectionProps> = ({
           </div>
         </div>
 
-        {/* Moderação de Artigos Publicados */}
-        <div className="p-4 rounded-xl bg-[#111D30] border border-[#26354B] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
-            <span className="font-black text-white block">Aprovação prévia de artigos publicados</span>
-            <span className="text-[11px] text-[#A6B2C5]">
-              Quando activado, novos artigos publicados pelos comerciantes aguardam aprovação antes de aparecer no catálogo.
-            </span>
+        {/* Moderação, Limites Diários e Filtro de Palavras Proibidas */}
+        <div className="p-4 rounded-xl bg-[#111D30] border border-[#26354B] space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <span className="font-black text-white block">Aprovação prévia de artigos publicados</span>
+              <span className="text-[11px] text-[#A6B2C5]">
+                Por defeito está em publicação directa. Quando activado, novos artigos aguardam aprovação antes de aparecer no catálogo.
+              </span>
+            </div>
+            <label className="inline-flex items-center gap-2.5 cursor-pointer shrink-0 select-none">
+              <input
+                type="checkbox"
+                checked={Boolean(draft.requireProductApproval)}
+                onChange={(e) => setDraft({ ...draft, requireProductApproval: e.target.checked })}
+                className="w-5 h-5 accent-[#B7F34A] cursor-pointer"
+              />
+              <span className={`font-black ${draft.requireProductApproval ? "text-[#B7F34A]" : "text-[#A6B2C5]"}`}>
+                {draft.requireProductApproval ? "Activa" : "Publicação directa"}
+              </span>
+            </label>
           </div>
-          <label className="inline-flex items-center gap-2.5 cursor-pointer shrink-0 select-none">
-            <input
-              type="checkbox"
-              checked={Boolean(draft.requireProductApproval)}
-              onChange={(e) => setDraft({ ...draft, requireProductApproval: e.target.checked })}
-              className="w-5 h-5 accent-[#B7F34A] cursor-pointer"
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-[#26354B]">
+            <div>
+              <label htmlFor="cfg-new-account-limit" className="block font-bold text-[#A6B2C5] mb-1">
+                Limite diário conta nova (&lt; 24h)
+              </label>
+              <input
+                id="cfg-new-account-limit"
+                type="number"
+                min="1"
+                max="100"
+                value={draft.newAccountDailyLimit ?? DEFAULT_NEW_ACCOUNT_DAILY_LIMIT}
+                onChange={(e) =>
+                  setDraft({ ...draft, newAccountDailyLimit: Math.max(1, Number(e.target.value) || 1) })
+                }
+                className="w-full p-2.5 rounded-xl bg-[#172338] border border-[#26354B] text-white font-bold outline-none focus:border-[#246BFD]"
+              />
+            </div>
+            <div>
+              <label htmlFor="cfg-established-account-limit" className="block font-bold text-[#A6B2C5] mb-1">
+                Limite diário conta estabelecida (&gt;= 24h)
+              </label>
+              <input
+                id="cfg-established-account-limit"
+                type="number"
+                min="1"
+                max="500"
+                value={draft.establishedAccountDailyLimit ?? DEFAULT_ESTABLISHED_ACCOUNT_DAILY_LIMIT}
+                onChange={(e) =>
+                  setDraft({ ...draft, establishedAccountDailyLimit: Math.max(1, Number(e.target.value) || 1) })
+                }
+                className="w-full p-2.5 rounded-xl bg-[#172338] border border-[#26354B] text-white font-bold outline-none focus:border-[#246BFD]"
+              />
+            </div>
+          </div>
+
+          <div className="pt-3 border-t border-[#26354B] space-y-2">
+            <label htmlFor="cfg-prohibited-keywords" className="block font-bold text-white">
+              Palavras proibidas na publicação (separadas por vírgula ou linha)
+            </label>
+            <p className="text-[11px] text-[#A6B2C5]">
+              Categorias protegidas:{" "}
+              {PROHIBITED_CATEGORY_EXAMPLES.map((c) => c.label).join(", ")}. Artigos correspondentes entram automaticamente em revisão.
+            </p>
+            <textarea
+              id="cfg-prohibited-keywords"
+              rows={3}
+              value={keywordsText}
+              onChange={(e) => setKeywordsText(e.target.value)}
+              className="w-full p-2.5 rounded-xl bg-[#172338] border border-[#26354B] text-white text-xs outline-none focus:border-[#246BFD]"
             />
-            <span className={`font-black ${draft.requireProductApproval ? "text-[#B7F34A]" : "text-[#A6B2C5]"}`}>
-              {draft.requireProductApproval ? "Activa" : "Publicação directa"}
-            </span>
-          </label>
+          </div>
         </div>
 
         {/* Configuração Global do Carrossel de Banners */}
@@ -304,6 +375,15 @@ export const ConfigSection: React.FC<ConfigSectionProps> = ({
             onClick={() => {
               const bannerDefaultDurationSec = clampBannerDurationSec(draft.bannerDefaultDurationSec);
               const bannerAutoplay = draft.bannerAutoplay !== false;
+              const newAccountDailyLimit = Math.max(
+                1,
+                Number(draft.newAccountDailyLimit ?? DEFAULT_NEW_ACCOUNT_DAILY_LIMIT)
+              );
+              const establishedAccountDailyLimit = Math.max(
+                1,
+                Number(draft.establishedAccountDailyLimit ?? DEFAULT_ESTABLISHED_ACCOUNT_DAILY_LIMIT)
+              );
+              const prohibitedKeywords = parseProhibitedKeywordsList(keywordsText);
               onRequestSaveConfig(
                 isSuperAdmin
                   ? {
@@ -319,6 +399,9 @@ export const ConfigSection: React.FC<ConfigSectionProps> = ({
                       deliveryCommissionPercent: draft.deliveryCommissionPercent,
                       courierMonthlyFee: draft.courierMonthlyFee,
                       requireProductApproval: Boolean(draft.requireProductApproval),
+                      newAccountDailyLimit,
+                      establishedAccountDailyLimit,
+                      prohibitedKeywords,
                       bannerDefaultDurationSec,
                       bannerAutoplay,
                       adminWhatsapp: draft.adminWhatsapp.trim() || "945379003",
@@ -337,10 +420,13 @@ export const ConfigSection: React.FC<ConfigSectionProps> = ({
                       deliveryCommissionPercent: draft.deliveryCommissionPercent,
                       courierMonthlyFee: draft.courierMonthlyFee,
                       requireProductApproval: Boolean(draft.requireProductApproval),
+                      newAccountDailyLimit,
+                      establishedAccountDailyLimit,
+                      prohibitedKeywords,
                       bannerDefaultDurationSec,
                       bannerAutoplay,
                     },
-                "Preços, comissões, carrossel de banners, moderação de artigos e definições globais do sistema"
+                "Preços, comissões, carrossel de banners, limites diários, palavras proibidas e definições globais"
               );
             }}
             className="ml-auto px-5 py-2.5 rounded-xl bg-[#B7F34A] text-slate-950 font-black flex items-center gap-2 cursor-pointer"

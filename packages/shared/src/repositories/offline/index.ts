@@ -28,6 +28,7 @@ import {
   AppErrorRecord,
   SystemHealthMetrics,
   NocServiceCheck,
+  UserBlock,
 } from "../../types";
 import {
   IProductRepo,
@@ -35,6 +36,7 @@ import {
   IMessageRepo,
   IUserRepo,
   IStoreRepo,
+  IUserBlockRepo,
   IStoreFollowerRepo,
   IStoreReviewRepo,
   IProductReviewRepo,
@@ -67,6 +69,8 @@ import {
   saveNotifications,
   getStoredReports,
   saveReports,
+  getStoredUserBlocks,
+  saveUserBlocks,
   getStoredStoreReviews,
   saveStoreReviews,
   getStoredProductReviews,
@@ -102,6 +106,16 @@ import {
   canUserReviewStore,
   filterStoreProducts,
 } from "../../lib/storefront";
+import {
+  PRODUCT_AUTO_HIDE_DISTINCT_REPORTERS,
+  buildBlockedSellerSet,
+  checkDailyPublishQuota,
+  countDistinctProductReporters,
+  countDistinctStoreReporters,
+  findProhibitedKeyword,
+  parseProhibitedKeywordsList,
+  validateProductPublishFields,
+} from "../../lib/moderation";
 import { allowTelemetryWrite, sanitizeTelemetryText } from "../../lib/observability";
 import {
   clampBannerDurationSec,
@@ -303,19 +317,35 @@ export const syncQueue = new SyncQueue();
 export class OfflineProductRepo implements IProductRepo {
   async getAll(filters?: ProductFilters): Promise<Product[]> {
     const stores = getStoredStores();
+    const users = getStoredUsers();
+    const current = getStoredCurrentUser();
+    const blockedSet = buildBlockedSellerSet(getStoredUserBlocks(), current?.id);
+    const bannedUserIds = new Set(users.filter((u) => u.isBanned).map((u) => u.id));
     const storeById = new Map(stores.map((s) => [s.id, s]));
-    const products = getStoredProducts().map((p) => {
-      const st = p.storeId ? storeById.get(p.storeId) : undefined;
-      return st
-        ? {
-            ...p,
-            storeName: p.storeName || st.name,
-            storeCode: st.code,
-            storeType: st.storeType,
-            storeVip: st.isVip,
+
+    const products = getStoredProducts()
+      .filter((p) => {
+        if (filters?.includeUnapproved) return true;
+        if (p.moderationStatus === "removido") return false;
+        if (p.sellerId && current?.id !== p.sellerId) {
+          if (blockedSet.has(p.sellerId) || bannedUserIds.has(p.sellerId)) {
+            return false;
           }
-        : p;
-    });
+        }
+        return true;
+      })
+      .map((p) => {
+        const st = p.storeId ? storeById.get(p.storeId) : undefined;
+        return st
+          ? {
+              ...p,
+              storeName: p.storeName || st.name,
+              storeCode: st.code,
+              storeType: st.storeType,
+              storeVip: st.isVip,
+            }
+          : p;
+      });
 
     if (
       !filters ||
@@ -345,22 +375,90 @@ export class OfflineProductRepo implements IProductRepo {
   }
 
   async getById(id: string): Promise<Product | null> {
-    const products = await this.getAll();
+    const products = await this.getAll({ includeUnapproved: true });
     return products.find((p) => p.id === id) || null;
   }
 
   async create(product: Partial<Product>): Promise<Product> {
     const currentUser = getStoredCurrentUser();
+    const users = getStoredUsers();
     const stores = getStoredStores();
     const cfg = getStoredSystemConfig();
+    const sellerId = product.sellerId || currentUser?.id || "anon";
+    const sellerProfile =
+      users.find((u) => u.id === sellerId) ||
+      (currentUser && currentUser.id === sellerId ? currentUser : undefined);
+
+    if (sellerProfile?.isBanned || sellerProfile?.isSuspended) {
+      throw new Error("Esta conta está banida ou suspensa e não pode publicar artigos.");
+    }
+
     const st = product.storeId ? stores.find((s) => s.id === product.storeId) : undefined;
+    if (st?.isSuspended) {
+      throw new Error("A tua loja encontra-se suspensa e não pode publicar artigos.");
+    }
+
+    const validation = validateProductPublishFields({
+      name: product.name,
+      price: product.price,
+      whatsapp: product.whatsapp || st?.phone || sellerProfile?.phone,
+      bairro: product.bairro || st?.bairro || sellerProfile?.bairro,
+      image: product.image,
+      images: product.images,
+    });
+    if (!validation.ok) {
+      throw new Error(validation.error || "Preenche todos os campos obrigatórios para publicar.");
+    }
+
+    const existingProducts = getStoredProducts();
+    const quota = checkDailyPublishQuota({
+      products: existingProducts,
+      sellerId,
+      userCreatedAt: sellerProfile?.createdAt,
+      config: cfg,
+    });
+    if (!quota.allowed) {
+      throw new Error(
+        `Limite diário de publicação atingido (${quota.limit} artigos por dia para esta conta).`
+      );
+    }
+
     const mutationId = `prod_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-    const defaultApproved = !cfg.requireProductApproval;
+    const primaryImage =
+      (product.image || "").trim() ||
+      (Array.isArray(product.images) ? product.images.find((x) => Boolean((x || "").trim())) || "" : "");
+    const galleryImages =
+      product.images && product.images.length > 0
+        ? product.images.filter(Boolean)
+        : primaryImage
+        ? [primaryImage]
+        : [];
+
+    const scanText = [
+      product.name || "",
+      product.description || "",
+      product.categoryName || "",
+      product.brand || "",
+    ].join(" ");
+    const matchedProhibited = findProhibitedKeyword(scanText, cfg.prohibitedKeywords);
+
+    let isApproved = product.isApproved ?? !cfg.requireProductApproval;
+    let moderationStatus: Product["moderationStatus"] = isApproved ? "publicado" : "em_revisao";
+    let moderationReason: string | null = cfg.requireProductApproval
+      ? "Aguarda aprovação prévia da moderação"
+      : null;
+
+    if (matchedProhibited) {
+      isApproved = false;
+      moderationStatus = "em_revisao";
+      moderationReason = `Artigo retido pelo filtro de conteúdo proibido (${matchedProhibited})`;
+    }
+
     const newProd: Product = {
       id: product.id || mutationId,
       storeId: product.storeId,
-      sellerId: product.sellerId || currentUser?.id || "anon",
-      name: product.name || "Artigo sem nome",
+      sellerId,
+      name: (product.name || "").trim(),
       description: product.description || "",
       price: Number(product.price || 0),
       oldPrice: product.oldPrice ? Number(product.oldPrice) : null,
@@ -369,13 +467,18 @@ export class OfflineProductRepo implements IProductRepo {
       categoryName: product.categoryName || "Electrónicos",
       condition: product.condition || "novo",
       brand: product.brand || "",
-      image: product.image || "",
-      images: product.images || (product.image ? [product.image] : []),
+      image: primaryImage,
+      images: galleryImages,
       videoUrl: product.videoUrl || null,
       mediaType: product.mediaType || (product.videoUrl ? "video" : "imagem"),
       province: "Uíge",
-      municipality: product.municipality || "Uíge",
-      isApproved: product.isApproved ?? defaultApproved,
+      municipality: product.municipality || st?.municipality || "Uíge",
+      bairro: (product.bairro || st?.bairro || sellerProfile?.bairro || "").trim(),
+      whatsapp: validation.normalizedWhatsapp,
+      isApproved,
+      moderationStatus,
+      moderationReason,
+      reportsCount: 0,
       storeName: product.storeName || st?.name || "Loja Local",
       storeCode: st?.code,
       storeType: product.storeType || st?.storeType || "loja_fixa",
@@ -386,7 +489,7 @@ export class OfflineProductRepo implements IProductRepo {
       createdAt: new Date().toISOString(),
     };
 
-    const list = [newProd, ...getStoredProducts()];
+    const list = [newProd, ...existingProducts];
     saveProducts(list);
     syncQueue.enqueue("CREATE_PRODUCT", newProd, mutationId);
     return newProd;
@@ -404,7 +507,43 @@ export class OfflineProductRepo implements IProductRepo {
   }
 
   async approve(id: string, isApproved: boolean): Promise<void> {
-    const list = getStoredProducts().map((p) => (p.id === id ? { ...p, isApproved } : p));
+    const list = getStoredProducts().map((p) =>
+      p.id === id
+        ? {
+            ...p,
+            isApproved,
+            moderationStatus: (isApproved ? "publicado" : "em_revisao") as Product["moderationStatus"],
+            moderationReason: isApproved ? null : p.moderationReason || "Em revisão pela moderação",
+          }
+        : p
+    );
+    saveProducts(list);
+  }
+
+  async moderateProduct(
+    id: string,
+    action: "restaurar" | "remover" | "suspender",
+    reason?: string
+  ): Promise<void> {
+    const cleanReason = reason?.trim() || "";
+    if ((action === "remover" || action === "suspender") && !cleanReason) {
+      throw new Error("Indica o motivo para remover ou ocultar o artigo.");
+    }
+    if (action === "remover") {
+      const list = getStoredProducts().filter((p) => p.id !== id);
+      saveProducts(list);
+      return;
+    }
+    const list = getStoredProducts().map((p) =>
+      p.id === id
+        ? {
+            ...p,
+            isApproved: action === "restaurar",
+            moderationStatus: (action === "restaurar" ? "publicado" : "em_revisao") as Product["moderationStatus"],
+            moderationReason: action === "restaurar" ? null : cleanReason,
+          }
+        : p
+    );
     saveProducts(list);
   }
 }
@@ -659,6 +798,53 @@ export class OfflineUserRepo implements IUserRepo {
   async suspendUser(id: string, isSuspended: boolean): Promise<void> {
     const users = getStoredUsers().map((u) => (u.id === id ? { ...u, isSuspended } : u));
     saveUsers(users);
+    const current = getStoredCurrentUser();
+    if (current && current.id === id) {
+      saveCurrentUser({ ...current, isSuspended });
+    }
+  }
+
+  async banUser(id: string, isBanned: boolean, reason?: string): Promise<void> {
+    const cleanReason = reason?.trim() || "";
+    if (isBanned && !cleanReason) {
+      throw new Error("Indica o motivo para banir este utilizador.");
+    }
+    const now = new Date().toISOString();
+    const users = getStoredUsers().map((u) =>
+      u.id === id
+        ? {
+            ...u,
+            isBanned,
+            isSuspended: isBanned,
+            banReason: isBanned ? cleanReason : null,
+            bannedAt: isBanned ? now : null,
+          }
+        : u
+    );
+    saveUsers(users);
+    const current = getStoredCurrentUser();
+    if (current && current.id === id) {
+      saveCurrentUser({
+        ...current,
+        isBanned,
+        isSuspended: isBanned,
+        banReason: isBanned ? cleanReason : null,
+        bannedAt: isBanned ? now : null,
+      });
+    }
+    if (isBanned) {
+      saveStores(
+        getStoredStores().map((st) =>
+          st.ownerId === id
+            ? {
+                ...st,
+                isSuspended: true,
+                suspensionReason: `Proprietário banido: ${cleanReason}`,
+              }
+            : st
+        )
+      );
+    }
   }
 
   async setRole(id: string, role: UserRole): Promise<void> {
@@ -674,10 +860,14 @@ export class OfflineUserRepo implements IUserRepo {
     id: string,
     data?: { phone?: string; municipality?: string; bairro?: string }
   ): Promise<User> {
+    const existing = getStoredUsers().find((u) => u.id === id) || getStoredCurrentUser();
+    if (existing?.isBanned || existing?.isSuspended) {
+      throw new Error("Esta conta está banida ou suspensa e não pode activar perfil de vendedor.");
+    }
     const patch: Partial<User> = {
       role: "comerciante",
-      isApproved: false,
-      approvalStatus: "pendente",
+      isApproved: true,
+      approvalStatus: "aprovado",
       ...(data?.phone ? { phone: data.phone } : {}),
       ...(data?.municipality ? { municipality: data.municipality } : {}),
       ...(data?.bairro ? { bairro: data.bairro } : {}),
@@ -733,7 +923,13 @@ export class OfflineStoreRepo implements IStoreRepo {
     const list = this.applyPlanExpiry(getStoredStores());
     if (includeInactive) return list;
     const current = getStoredCurrentUser();
-    return list.filter((s) => (s.isApproved && !s.isSuspended) || (current && s.ownerId === current.id));
+    const blockedSet = buildBlockedSellerSet(getStoredUserBlocks(), current?.id);
+    const bannedIds = new Set(getStoredUsers().filter((u) => u.isBanned).map((u) => u.id));
+    return list.filter((s) => {
+      if (current && s.ownerId === current.id) return true;
+      if (bannedIds.has(s.ownerId) || blockedSet.has(s.ownerId)) return false;
+      return s.isApproved && !s.isSuspended;
+    });
   }
 
   async getById(id: string): Promise<Store | null> {
@@ -767,6 +963,15 @@ export class OfflineStoreRepo implements IStoreRepo {
     const existing = getStoredStores();
     const cleanMutationId = store.clientMutationId?.trim() || undefined;
     const ownerId = store.ownerId || "anon";
+
+    const users = getStoredUsers();
+    const current = getStoredCurrentUser();
+    const ownerProfile =
+      users.find((u) => u.id === ownerId) ||
+      (current && current.id === ownerId ? current : undefined);
+    if (ownerProfile?.isBanned || ownerProfile?.isSuspended) {
+      throw new Error("Esta conta está banida ou suspensa e não pode criar uma loja.");
+    }
 
     if (cleanMutationId) {
       const byMutation = existing.find((s) => s.clientMutationId === cleanMutationId);
@@ -813,7 +1018,9 @@ export class OfflineStoreRepo implements IStoreRepo {
       facadeImage: store.facadeImage || "",
       biPhotoUrl: store.biPhotoUrl || "",
       logo: store.logo || store.facadeImage || "",
-      isApproved: storeType === "vendedor_ambulante" ? false : Boolean(store.isApproved),
+      isApproved: true,
+      approvalStatus: "aprovado",
+      verified: Boolean(store.verified ?? false),
       isSuspended: false,
       isVip: false,
       planType: "gratis",
@@ -865,6 +1072,13 @@ export class OfflineStoreRepo implements IStoreRepo {
     saveStores(stores);
   }
 
+  async verifyStore(id: string, verified: boolean): Promise<void> {
+    const stores = getStoredStores().map((s) =>
+      s.id === id ? { ...s, verified } : s
+    );
+    saveStores(stores);
+  }
+
   async setPlan(id: string, planType: PlanType, durationDays = 30): Promise<void> {
     const expiresAt = planType === "gratis" ? null : new Date(Date.now() + durationDays * 86400000).toISOString();
     const stores = getStoredStores().map((s) =>
@@ -873,6 +1087,50 @@ export class OfflineStoreRepo implements IStoreRepo {
         : s
     );
     saveStores(stores);
+  }
+}
+
+// 5A. BLOQUEIOS DE UTILIZADORES / VENDEDORES (Offline)
+export class OfflineUserBlockRepo implements IUserBlockRepo {
+  async getAll(blockerId?: string): Promise<UserBlock[]> {
+    const all = getStoredUserBlocks();
+    return blockerId ? all.filter((b) => b.blockerId === blockerId) : all;
+  }
+
+  async getBlockedIds(blockerId: string): Promise<string[]> {
+    if (!blockerId) return [];
+    return getStoredUserBlocks()
+      .filter((b) => b.blockerId === blockerId)
+      .map((b) => b.blockedId);
+  }
+
+  async isBlocked(blockerId: string, blockedId: string): Promise<boolean> {
+    if (!blockerId || !blockedId) return false;
+    return getStoredUserBlocks().some((b) => b.blockerId === blockerId && b.blockedId === blockedId);
+  }
+
+  async block(blockerId: string, blockedId: string, reason?: string): Promise<UserBlock> {
+    if (!blockerId || !blockedId || blockerId === blockedId) {
+      throw new Error("Não é possível bloquear este utilizador.");
+    }
+    const existing = getStoredUserBlocks();
+    const found = existing.find((b) => b.blockerId === blockerId && b.blockedId === blockedId);
+    if (found) return found;
+    const item: UserBlock = {
+      id: `blk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      blockerId,
+      blockedId,
+      reason: reason?.trim() || null,
+      createdAt: new Date().toISOString(),
+    };
+    saveUserBlocks([item, ...existing]);
+    return item;
+  }
+
+  async unblock(blockerId: string, blockedId: string): Promise<void> {
+    saveUserBlocks(
+      getStoredUserBlocks().filter((b) => !(b.blockerId === blockerId && b.blockedId === blockedId))
+    );
   }
 }
 
@@ -1075,38 +1333,80 @@ export class OfflineNotificationRepo implements INotificationRepo {
   }
 }
 
-// 7. REPOSITÓRIO OFFLINE DE DENÚNCIAS (Com suspensão automática da loja por excesso)
+// 7. REPOSITÓRIO OFFLINE DE DENÚNCIAS (Oculta artigo com 3 contas distintas e suspende loja)
 export class OfflineReportRepo implements IReportRepo {
   async getAll(): Promise<ReportItem[]> {
     return getStoredReports();
   }
 
   async create(report: Partial<ReportItem>): Promise<ReportItem> {
+    const existing = getStoredReports();
+    const reporterId = report.reporterId || "anon";
+
+    const duplicate = existing.find((r) => {
+      if (r.reporterId !== reporterId) return false;
+      if (report.reviewId && r.reviewId === report.reviewId && r.reviewType === report.reviewType) return true;
+      if (report.productId && r.productId === report.productId) return true;
+      if (report.storeId && !report.productId && !report.reviewId && r.storeId === report.storeId && !r.productId && !r.reviewId) {
+        return true;
+      }
+      return false;
+    });
+    if (duplicate) {
+      throw new Error("Já denunciaste este registo anteriormente.");
+    }
+
     const products = getStoredProducts();
     const matchedProd = report.productId ? products.find((p) => p.id === report.productId) : undefined;
     const targetStoreId = report.storeId || matchedProd?.storeId;
     const targetStore = targetStoreId ? getStoredStores().find((s) => s.id === targetStoreId) : undefined;
 
     const item: ReportItem = {
-      id: `rep_${Date.now()}`,
-      reporterId: report.reporterId || "anon",
+      id: `rep_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      reporterId,
       productId: report.productId,
       productName: report.productName || matchedProd?.name,
       storeId: targetStoreId,
       storeName: report.storeName || targetStore?.name,
-      reason: report.reason || "",
+      reviewId: report.reviewId,
+      reviewType: report.reviewType,
+      reviewComment: report.reviewComment,
+      reason: (report.reason || "").trim() || "Irregularidade reportada",
       status: "pendente",
       createdAt: new Date().toISOString(),
     };
 
-    const nextReports = [item, ...getStoredReports()];
+    const nextReports = [item, ...existing];
     saveReports(nextReports);
 
-    if (targetStoreId) {
+    // Produto: 3 denúncias de contas distintas ocultam automaticamente o artigo para revisão admin
+    if (report.productId) {
+      const distinctProductCount = countDistinctProductReporters(nextReports, report.productId);
+      saveProducts(
+        products.map((p) =>
+          p.id === report.productId
+            ? {
+                ...p,
+                reportsCount: distinctProductCount,
+                isApproved: distinctProductCount >= PRODUCT_AUTO_HIDE_DISTINCT_REPORTERS ? false : p.isApproved,
+                moderationStatus:
+                  distinctProductCount >= PRODUCT_AUTO_HIDE_DISTINCT_REPORTERS
+                    ? "em_revisao"
+                    : p.moderationStatus || (p.isApproved ? "publicado" : "em_revisao"),
+                moderationReason:
+                  distinctProductCount >= PRODUCT_AUTO_HIDE_DISTINCT_REPORTERS && !p.moderationReason
+                    ? "Ocultado automaticamente após 3 denúncias de contas diferentes"
+                    : p.moderationReason,
+              }
+            : p
+        )
+      );
+    }
+
+    // Loja: denúncias directas à loja
+    if (targetStoreId && !report.productId && !report.reviewId) {
       const cfg = getStoredSystemConfig();
-      const storeReportsCount = nextReports.filter(
-        (r) => r.storeId === targetStoreId && r.status !== "rejeitado"
-      ).length;
+      const storeReportsCount = countDistinctStoreReporters(nextReports, targetStoreId);
       saveStores(
         getStoredStores().map((st) =>
           st.id === targetStoreId
@@ -1729,6 +2029,18 @@ export class OfflineSystemConfigRepo implements ISystemConfigRepo {
     const next: SystemConfig = {
       ...current,
       ...updates,
+      newAccountDailyLimit:
+        updates.newAccountDailyLimit !== undefined
+          ? Math.max(1, Math.round(Number(updates.newAccountDailyLimit) || 5))
+          : current.newAccountDailyLimit,
+      establishedAccountDailyLimit:
+        updates.establishedAccountDailyLimit !== undefined
+          ? Math.max(1, Math.round(Number(updates.establishedAccountDailyLimit) || 30))
+          : current.establishedAccountDailyLimit,
+      prohibitedKeywords:
+        updates.prohibitedKeywords !== undefined
+          ? parseProhibitedKeywordsList(updates.prohibitedKeywords)
+          : current.prohibitedKeywords,
       bannerDefaultDurationSec:
         updates.bannerDefaultDurationSec !== undefined
           ? clampBannerDurationSec(updates.bannerDefaultDurationSec, current.bannerDefaultDurationSec)

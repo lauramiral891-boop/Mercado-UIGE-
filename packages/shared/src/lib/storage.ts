@@ -19,7 +19,13 @@ import {
   SystemEvent,
   AppErrorRecord,
   NocHistorySample,
+  UserBlock,
 } from "../types";
+import {
+  DEFAULT_ESTABLISHED_ACCOUNT_DAILY_LIMIT,
+  DEFAULT_NEW_ACCOUNT_DAILY_LIMIT,
+  DEFAULT_PROHIBITED_KEYWORDS,
+} from "./moderation";
 
 const STORAGE_KEYS = {
   CURRENT_USER: "mu_current_user_v3",
@@ -30,6 +36,7 @@ const STORAGE_KEYS = {
   MESSAGES: "mu_messages_v3",
   NOTIFICATIONS: "mu_notifications_v3",
   REPORTS: "mu_reports_v3",
+  USER_BLOCKS: "mu_user_blocks_v1",
   STORE_REVIEWS: "mu_store_reviews_v1",
   PRODUCT_REVIEWS: "mu_product_reviews_v1",
   STORE_FOLLOWERS: "mu_store_followers_v1",
@@ -64,6 +71,9 @@ export const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
   courierBasicPrice: 3000,
   courierVipPrice: 8000,
   requireProductApproval: false,
+  newAccountDailyLimit: DEFAULT_NEW_ACCOUNT_DAILY_LIMIT,
+  establishedAccountDailyLimit: DEFAULT_ESTABLISHED_ACCOUNT_DAILY_LIMIT,
+  prohibitedKeywords: DEFAULT_PROHIBITED_KEYWORDS,
   maintenanceMode: false,
   maintenanceMessage: "Estamos em manutenção programada para melhorar o Mercado Uíge. Voltamos em breve.",
   bannerDefaultDurationSec: 8,
@@ -122,6 +132,9 @@ export const saveNotifications = (notifs: NotificationItem[]) => setSafe(STORAGE
 
 export const getStoredReports = (): ReportItem[] => getSafe<ReportItem[]>(STORAGE_KEYS.REPORTS, []);
 export const saveReports = (reports: ReportItem[]) => setSafe(STORAGE_KEYS.REPORTS, reports);
+
+export const getStoredUserBlocks = (): UserBlock[] => getSafe<UserBlock[]>(STORAGE_KEYS.USER_BLOCKS, []);
+export const saveUserBlocks = (blocks: UserBlock[]) => setSafe(STORAGE_KEYS.USER_BLOCKS, blocks);
 
 export const getStoredStoreReviews = (): StoreReview[] => getSafe<StoreReview[]>(STORAGE_KEYS.STORE_REVIEWS, []);
 export const saveStoreReviews = (reviews: StoreReview[]) => setSafe(STORAGE_KEYS.STORE_REVIEWS, reviews);

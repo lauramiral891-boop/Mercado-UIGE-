@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { Camera, CheckCircle2, Image as ImageIcon, Lock, Star, Trash2 } from "lucide-react";
+import { Camera, CheckCircle2, Flag, Image as ImageIcon, Lock, Star, Trash2 } from "lucide-react";
 import {
   Avatar,
   ProductReview,
@@ -21,6 +21,7 @@ export type ReviewRecord = StoreReview | ProductReview;
 
 interface ReviewsSectionProps {
   title?: string;
+  reviewType?: "loja" | "produto";
   reviews: ReviewRecord[];
   currentUser: User | null;
   canReview: boolean;
@@ -31,16 +32,23 @@ interface ReviewsSectionProps {
     comment: string;
     photos: string[];
   }) => Promise<void>;
+  onReportReview?: (
+    reviewId: string,
+    reviewType: "loja" | "produto",
+    reason: string
+  ) => Promise<void> | void;
 }
 
 export const ReviewsSection: React.FC<ReviewsSectionProps> = ({
   title = "Avaliações",
+  reviewType = "produto",
   reviews,
   currentUser,
   canReview,
   emptyEligibilityHint = "Apenas clientes com encomenda entregue podem publicar avaliação.",
   onRequireAuth,
   onSubmitReview,
+  onReportReview,
 }) => {
   const [filter, setFilter] = useState<ReviewFilterMode>("todas");
   const [stars, setStars] = useState(5);
@@ -51,6 +59,9 @@ export const ReviewsSection: React.FC<ReviewsSectionProps> = ({
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [reportingReviewId, setReportingReviewId] = useState<string | null>(null);
+  const [reviewReportReason, setReviewReportReason] = useState("");
+  const [sendingReviewReport, setSendingReviewReport] = useState(false);
   const [galleryState, setGalleryState] = useState<{
     images: string[];
     index: number;
@@ -375,18 +386,73 @@ export const ReviewsSection: React.FC<ReviewsSectionProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-0.5 shrink-0" aria-label={`${rev.stars} estrelas`}>
-                    {[1, 2, 3, 4, 5].map((s) => (
-                      <Star
-                        key={s}
-                        size={12}
-                        className={s <= rev.stars ? "text-red-600 fill-red-600" : "opacity-25"}
-                      />
-                    ))}
+                  <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex items-center gap-0.5" aria-label={`${rev.stars} estrelas`}>
+                      {[1, 2, 3, 4, 5].map((s) => (
+                        <Star
+                          key={s}
+                          size={12}
+                          className={s <= rev.stars ? "text-red-600 fill-red-600" : "opacity-25"}
+                        />
+                      ))}
+                    </div>
+                    {onReportReview && currentUser?.id !== rev.userId && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!currentUser) {
+                            onRequireAuth?.();
+                            return;
+                          }
+                          setReportingReviewId((curr) => (curr === rev.id ? null : rev.id));
+                          setReviewReportReason("");
+                        }}
+                        className="text-[11px] font-bold text-red-600/80 hover:text-red-600 inline-flex items-center gap-1 cursor-pointer"
+                        title="Denunciar avaliação"
+                      >
+                        <Flag size={11} />
+                        <span>Denunciar</span>
+                      </button>
+                    )}
                   </div>
                 </div>
 
                 {rev.comment && <p className="text-xs leading-relaxed break-words">{rev.comment}</p>}
+
+                {reportingReviewId === rev.id && onReportReview && (
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      if (!reviewReportReason.trim()) return;
+                      setSendingReviewReport(true);
+                      try {
+                        await onReportReview(rev.id, reviewType, reviewReportReason.trim());
+                        setReportingReviewId(null);
+                        setReviewReportReason("");
+                      } finally {
+                        setSendingReviewReport(false);
+                      }
+                    }}
+                    className="flex flex-wrap sm:flex-nowrap gap-1.5 pt-1"
+                  >
+                    <input
+                      type="text"
+                      required
+                      value={reviewReportReason}
+                      onChange={(e) => setReviewReportReason(e.target.value)}
+                      placeholder="Motivo da denúncia desta avaliação..."
+                      className="flex-1 min-w-0 px-2.5 py-1.5 rounded-xl border bg-transparent text-xs outline-none focus:border-red-600"
+                      style={{ borderColor: "var(--rbw-border)" }}
+                    />
+                    <button
+                      type="submit"
+                      disabled={sendingReviewReport || !reviewReportReason.trim()}
+                      className="px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
+                    >
+                      {sendingReviewReport ? "..." : "Enviar"}
+                    </button>
+                  </form>
+                )}
 
                 {photos.length > 0 && (
                   <div className="flex flex-wrap gap-2 pt-1">

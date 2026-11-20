@@ -78,7 +78,8 @@ describe("Regras de Negócio — Lojas, Denúncias, Planos, Uíge e Entregas", (
 
     expect(s1.code).toBe("LJ-0001");
     expect(s2.code).toBe("LJ-0002");
-    expect(s2.isApproved).toBe(false); // Vendedor ambulante só fica activo após aprovação admin
+    expect(s2.isApproved).toBe(true); // Publicação livre: loja nasce activa; verificação oficial é separada
+    expect(s2.verified).toBe(false);
   });
 
   it("suspende loja automaticamente ao atingir o número configurado de denúncias", async () => {

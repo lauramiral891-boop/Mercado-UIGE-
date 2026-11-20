@@ -49,6 +49,10 @@ export interface User {
   correctionNote?: string | null;
   walletBalance: number;
   isSuspended?: boolean;
+  isBanned?: boolean;
+  banReason?: string | null;
+  bannedAt?: string | null;
+  termsAcceptedAt?: string | null;
   isVerified?: boolean;
   welcomeSentAt?: string | null;
   planType?: PlanType;
@@ -124,7 +128,11 @@ export interface Product {
   province: string;
   municipality: string;
   bairro?: string;
+  whatsapp?: string;
   isApproved: boolean;
+  moderationStatus?: "publicado" | "em_revisao" | "removido";
+  moderationReason?: string | null;
+  reportsCount?: number;
   isFeatured?: boolean;
   isSponsored?: boolean;
   sales: number;
@@ -217,8 +225,19 @@ export interface ReportItem {
   productName?: string;
   storeId?: string;
   storeName?: string;
+  reviewId?: string;
+  reviewType?: "loja" | "produto";
+  reviewComment?: string;
   reason: string;
   status: "pendente" | "resolvido" | "rejeitado";
+  createdAt: string;
+}
+
+export interface UserBlock {
+  id: string;
+  blockerId: string;
+  blockedId: string;
+  reason?: string | null;
   createdAt: string;
 }
 
@@ -381,6 +400,9 @@ export interface SystemConfig {
   courierBasicPrice: number;
   courierVipPrice: number;
   requireProductApproval?: boolean;
+  newAccountDailyLimit?: number;
+  establishedAccountDailyLimit?: number;
+  prohibitedKeywords?: string[];
   maintenanceMode?: boolean;
   maintenanceMessage?: string;
   bannerDefaultDurationSec: number;

@@ -97,21 +97,35 @@ export const ApprovalsSection: React.FC<ApprovalsSectionProps> = ({
         rawUser: u,
       }));
 
-    const productEntries: ApprovalEntry[] = products.map((p) => ({
-      id: `prod_${p.id}`,
-      kind: "produto",
-      code: p.storeCode || "ART",
-      name: p.name,
-      subtitle: `${fmtKz(p.price)} · ${p.condition === "usado" ? "Usado" : "Novo"} · ${p.categoryName}`,
-      location: `${p.storeName || "Loja Local"} · ${p.municipality || "Uíge"}`,
-      phone: p.videoUrl ? "Com vídeo" : "Com fotografia",
-      biPhotoUrl: null,
-      facadeImage: p.image || p.images?.[0] || null,
-      approvalStatus: p.isApproved ? "aprovado" : "pendente",
-      note: null,
-      createdAt: p.createdAt,
-      rawProduct: p,
-    }));
+    const productEntries: ApprovalEntry[] = products.map((p) => {
+      const modStatus =
+        p.moderationStatus === "removido"
+          ? "rejeitado"
+          : p.moderationStatus === "em_revisao"
+          ? "correcao"
+          : p.isApproved
+          ? "aprovado"
+          : "pendente";
+      const noteParts = [
+        p.moderationReason || null,
+        (p.reportsCount || 0) > 0 ? `${p.reportsCount} denúncia(s)` : null,
+      ].filter(Boolean);
+      return {
+        id: `prod_${p.id}`,
+        kind: "produto",
+        code: p.storeCode || "ART",
+        name: p.name,
+        subtitle: `${fmtKz(p.price)} · ${p.condition === "usado" ? "Usado" : "Novo"} · ${p.categoryName}`,
+        location: `${p.storeName || "Loja Local"} · ${p.municipality || "Uíge"}`,
+        phone: p.videoUrl ? "Com vídeo" : "Com fotografia",
+        biPhotoUrl: null,
+        facadeImage: p.image || p.images?.[0] || null,
+        approvalStatus: modStatus,
+        note: noteParts.length > 0 ? noteParts.join(" · ") : null,
+        createdAt: p.createdAt,
+        rawProduct: p,
+      };
+    });
 
     return [...storeEntries, ...userEntries, ...productEntries].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -150,7 +164,7 @@ export const ApprovalsSection: React.FC<ApprovalsSectionProps> = ({
       ["Código", "Tipo", "Nome", "Detalhes", "Localização", "Telefone", "Estado", "Nota", "Data"],
       filtered.map((e) => [
         e.code,
-        e.kind === "loja" ? "Loja" : "Conta",
+        e.kind === "loja" ? "Loja" : e.kind === "produto" ? "Artigo" : "Conta",
         e.name,
         e.subtitle,
         e.location,
@@ -239,7 +253,11 @@ export const ApprovalsSection: React.FC<ApprovalsSectionProps> = ({
                         : "bg-amber-500/15 text-amber-300"
                     }`}
                   >
-                    {entry.approvalStatus === "correcao" ? "Em correcção" : entry.approvalStatus}
+                    {entry.approvalStatus === "correcao"
+                      ? entry.kind === "produto"
+                        ? "Em revisão"
+                        : "Em correcção"
+                      : entry.approvalStatus}
                   </span>
                 </div>
 
@@ -318,19 +336,21 @@ export const ApprovalsSection: React.FC<ApprovalsSectionProps> = ({
               <div className="pt-3 border-t border-[#26354B] flex flex-wrap gap-2">
                 {entry.kind === "produto" && entry.rawProduct ? (
                   <>
-                    <button
-                      type="button"
-                      onClick={() => onApproveProduct?.(entry.rawProduct!)}
-                      className="flex-1 px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-                    >
-                      <CheckCircle2 size={14} /> Aprovar Artigo
-                    </button>
+                    {(!entry.rawProduct.isApproved || entry.rawProduct.moderationStatus !== "publicado") && (
+                      <button
+                        type="button"
+                        onClick={() => onApproveProduct?.(entry.rawProduct!)}
+                        className="flex-1 px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                      >
+                        <CheckCircle2 size={14} /> Restaurar Artigo
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => onRejectProduct?.(entry.rawProduct!)}
                       className="px-3 py-2 rounded-xl bg-red-500/15 border border-red-500/30 text-red-300 hover:bg-red-500 hover:text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
                     >
-                      <XCircle size={14} /> Remover
+                      <XCircle size={14} /> Remover Artigo
                     </button>
                   </>
                 ) : (

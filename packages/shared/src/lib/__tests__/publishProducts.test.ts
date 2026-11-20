@@ -51,11 +51,11 @@ describe("FASE 2 — Publicação de Artigos (+ Publicar, Vídeo e Moderação)"
     };
   });
 
-  it("botão Publicar na barra encaminha conforme perfil: login, Quero vender ou formulário", () => {
+  it("botão Publicar na barra encaminha conforme perfil: login, Quero vender, banido ou formulário", () => {
     expect(canMerchantPublishFloating(null)).toBe(false);
     expect(canMerchantPublishFloating({ ...APPROVED_MERCHANT, role: "cliente" })).toBe(false);
     expect(canMerchantPublishFloating({ ...APPROVED_MERCHANT, role: "entregador" })).toBe(false);
-    expect(canMerchantPublishFloating({ ...APPROVED_MERCHANT, isApproved: false })).toBe(false);
+    expect(canMerchantPublishFloating({ ...APPROVED_MERCHANT, isBanned: true })).toBe(false);
     expect(canMerchantPublishFloating({ ...APPROVED_MERCHANT, isSuspended: true })).toBe(false);
     expect(canMerchantPublishFloating(APPROVED_MERCHANT, { ...APPROVED_STORE, isSuspended: true })).toBe(false);
     expect(canMerchantPublishFloating(APPROVED_MERCHANT, { ...APPROVED_STORE, isApproved: false })).toBe(false);
@@ -65,7 +65,8 @@ describe("FASE 2 — Publicação de Artigos (+ Publicar, Vídeo e Moderação)"
 
     expect(resolvePublishAction(null)).toBe("login");
     expect(resolvePublishAction({ ...APPROVED_MERCHANT, role: "cliente" })).toBe("want_to_sell");
-    expect(resolvePublishAction({ ...APPROVED_MERCHANT, isApproved: false })).toBe("want_to_sell");
+    expect(resolvePublishAction({ ...APPROVED_MERCHANT, isBanned: true })).toBe("banned");
+    expect(resolvePublishAction({ ...APPROVED_MERCHANT, isSuspended: true })).toBe("banned");
     expect(resolvePublishAction(APPROVED_MERCHANT, APPROVED_STORE)).toBe("publish");
   });
 
@@ -88,7 +89,7 @@ describe("FASE 2 — Publicação de Artigos (+ Publicar, Vídeo e Moderação)"
     const configRepo = new OfflineSystemConfigRepo();
     const prodRepo = new OfflineProductRepo();
 
-    // Publicação directa quando moderação está desligada
+    // Publicação directa quando moderação está desligada (padrão actual)
     await configRepo.update({ requireProductApproval: false });
     const directProd = await prodRepo.create({
       sellerId: APPROVED_MERCHANT.id,
@@ -97,6 +98,9 @@ describe("FASE 2 — Publicação de Artigos (+ Publicar, Vídeo e Moderação)"
       price: 85000,
       condition: "novo",
       categoryName: "Electrónicos",
+      whatsapp: "923111222",
+      bairro: "Centro da Cidade",
+      image: "https://cdn.uige.ao/tv.jpg",
     });
     expect(directProd.isApproved).toBe(true);
 
@@ -109,13 +113,16 @@ describe("FASE 2 — Publicação de Artigos (+ Publicar, Vídeo e Moderação)"
       price: 120000,
       condition: "usado",
       categoryName: "Casa e Lar",
+      whatsapp: "923111222",
+      bairro: "Centro da Cidade",
+      image: "https://cdn.uige.ao/gerador-capa.jpg",
       videoUrl: "https://cdn.uige.ao/demo.webm",
       mediaType: "video",
     });
     expect(moderatedProd.isApproved).toBe(false);
     expect(moderatedProd.mediaType).toBe("video");
 
-    // Admin aprova o artigo pendente
+    // Admin restaura/aprova o artigo pendente
     await prodRepo.approve(moderatedProd.id, true);
     const reloaded = await prodRepo.getById(moderatedProd.id);
     expect(reloaded?.isApproved).toBe(true);

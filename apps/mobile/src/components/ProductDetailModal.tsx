@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   BadgeCheck,
+  Ban,
   Calendar,
   ChevronLeft,
   ChevronRight,
@@ -34,6 +35,7 @@ import {
   fmtKz,
   formatActiveSince,
   formatStoreType,
+  getStoreVerificationLabel,
   isStoreVerified,
   nativePlugins,
   productReviewRepo,
@@ -59,6 +61,13 @@ interface ProductDetailModalProps {
     comment: string;
     photos: string[];
   }) => Promise<void>;
+  isSellerBlocked?: boolean;
+  onToggleBlockSeller?: (sellerId: string) => Promise<void> | void;
+  onReportReview?: (
+    reviewId: string,
+    reviewType: "loja" | "produto",
+    reason: string
+  ) => Promise<void> | void;
   onRequireAuth?: () => void;
   similarProducts: Product[];
   onSelectProduct: (p: Product) => void;
@@ -80,6 +89,9 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
   orders = [],
   currentUser = null,
   onSubmitProductReview,
+  isSellerBlocked = false,
+  onToggleBlockSeller,
+  onReportReview,
   onRequireAuth,
   similarProducts,
   onSelectProduct,
@@ -682,9 +694,20 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
                     <div className="min-w-0 space-y-0.5">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className="text-sm font-black truncate">{storeNameDisplay}</span>
-                        {storeVerified && (
-                          <span className="inline-flex items-center gap-0.5 text-[11px] font-bold text-red-600">
-                            <BadgeCheck size={13} /> Loja verificada
+                        {storeVerified ? (
+                          <span
+                            data-testid="product-seller-verified"
+                            className="inline-flex items-center gap-0.5 text-[11px] font-bold text-red-600"
+                          >
+                            <BadgeCheck size={13} /> {getStoreVerificationLabel(sellerStore)}
+                          </span>
+                        ) : (
+                          <span
+                            data-testid="product-seller-unverified"
+                            className="text-[11px] font-medium"
+                            style={{ color: "var(--rbw-muted)" }}
+                          >
+                            {getStoreVerificationLabel(sellerStore)}
                           </span>
                         )}
                       </div>
@@ -720,11 +743,28 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
                 </div>
 
                 <div
-                  className="pt-2.5 border-t flex items-center gap-2 text-[11px] font-medium"
+                  className="pt-2.5 border-t flex flex-wrap items-center justify-between gap-2 text-[11px] font-medium"
                   style={{ borderColor: "var(--rbw-border)", color: "var(--rbw-muted)" }}
                 >
-                  <Truck size={14} className="text-red-600 shrink-0" />
-                  <span>Entrega no Uíge ou levantamento directo combinado com a loja</span>
+                  <div className="flex items-center gap-2">
+                    <Truck size={14} className="text-red-600 shrink-0" />
+                    <span>Entrega no Uíge ou levantamento directo combinado com a loja</span>
+                  </div>
+                  {onToggleBlockSeller &&
+                    (sellerStore?.ownerId || product.sellerId) &&
+                    currentUser?.id !== (sellerStore?.ownerId || product.sellerId) && (
+                      <button
+                        type="button"
+                        data-testid="product-block-seller-btn"
+                        onClick={() =>
+                          onToggleBlockSeller((sellerStore?.ownerId || product.sellerId)!)
+                        }
+                        className="inline-flex items-center gap-1 font-bold hover:text-red-600 cursor-pointer"
+                      >
+                        <Ban size={12} />
+                        <span>{isSellerBlocked ? "Desbloquear vendedor" : "Bloquear vendedor"}</span>
+                      </button>
+                    )}
                 </div>
               </div>
 
@@ -804,12 +844,14 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
           {/* Avaliações do Produto (apenas quem tem encomenda entregue) */}
           <ReviewsSection
             title="Avaliações do produto"
+            reviewType="produto"
             reviews={resolvedReviews}
             currentUser={currentUser}
             canReview={canReview}
             emptyEligibilityHint="Apenas clientes com encomenda entregue deste produto podem avaliar."
             onRequireAuth={onRequireAuth}
             onSubmitReview={handleLocalOrRemoteReviewSubmit}
+            onReportReview={onReportReview}
           />
 
           {/* Produtos Semelhantes */}

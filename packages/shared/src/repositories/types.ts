@@ -26,6 +26,7 @@ import {
   AppErrorRecord,
   SystemHealthMetrics,
   NocServiceCheck,
+  UserBlock,
 } from "../types";
 import { SearchPersonalization } from "../lib/utils";
 
@@ -39,6 +40,7 @@ export interface ProductFilters {
   availableOnly?: boolean;
   sort?: string;
   personalization?: SearchPersonalization;
+  includeUnapproved?: boolean;
 }
 
 export interface IProductRepo {
@@ -48,6 +50,7 @@ export interface IProductRepo {
   updateStock(id: string, newStock: number): Promise<void>;
   delete(id: string): Promise<void>;
   approve(id: string, isApproved: boolean): Promise<void>;
+  moderateProduct(id: string, action: "restaurar" | "remover" | "suspender", reason?: string): Promise<void>;
 }
 
 export interface IOrderRepo {
@@ -90,6 +93,7 @@ export interface IUserRepo {
   approveUser(id: string, isApproved: boolean): Promise<void>;
   updateApproval(id: string, status: ApprovalStatus, note?: string): Promise<void>;
   suspendUser(id: string, isSuspended: boolean): Promise<void>;
+  banUser(id: string, isBanned: boolean, reason?: string): Promise<void>;
   setRole(id: string, role: UserRole): Promise<void>;
   requestMerchantUpgrade(id: string, data?: { phone?: string; municipality?: string; bairro?: string }): Promise<User>;
   setPlan(id: string, planType: PlanType, durationDays?: number): Promise<void>;
@@ -105,7 +109,16 @@ export interface IStoreRepo {
   toggleApproval(id: string, isApproved: boolean): Promise<void>;
   updateApproval(id: string, status: ApprovalStatus, note?: string): Promise<void>;
   suspendStore(id: string, isSuspended: boolean, reason?: string): Promise<void>;
+  verifyStore(id: string, verified: boolean, reason?: string): Promise<void>;
   setPlan(id: string, planType: PlanType, durationDays?: number): Promise<void>;
+}
+
+export interface IUserBlockRepo {
+  getBlockedIds(blockerId: string): Promise<string[]>;
+  getAll(blockerId?: string): Promise<UserBlock[]>;
+  block(blockerId: string, blockedId: string, reason?: string): Promise<UserBlock>;
+  unblock(blockerId: string, blockedId: string): Promise<void>;
+  isBlocked(blockerId: string, blockedId: string): Promise<boolean>;
 }
 
 export interface IStoreFollowerRepo {

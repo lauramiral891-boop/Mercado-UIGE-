@@ -20,6 +20,10 @@ import {
   MAX_VIDEO_DURATION_SEC,
   compressImage,
   compressVideoOnDevice,
+  captureVideoFirstFrame,
+  checkDailyPublishQuota,
+  getBairrosByMunicipality,
+  validateProductPublishFields,
   productRepo,
   uploadMediaFile,
   isSupabaseConfigured,
@@ -31,6 +35,7 @@ interface PublishProductModalProps {
   onClose: () => void;
   user: User | null;
   myStore: Store | null;
+  myProducts?: Product[];
   categories: Category[];
   systemConfig: SystemConfig;
   onPublished: (product: Product) => Promise<void> | void;
@@ -51,12 +56,14 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
   onClose,
   user,
   myStore,
+  myProducts = [],
   categories,
   systemConfig,
   onPublished,
   onGoToSeller,
   showToast,
 }) => {
+  const initialMun = myStore?.municipality || user?.municipality || "Uíge";
   const [mediaKind, setMediaKind] = useState<"imagem" | "video">("imagem");
   const [photos, setPhotos] = useState<CompressedPhotoItem[]>([]);
   const [videoState, setVideoState] = useState<{
@@ -66,14 +73,17 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
     durationSec: number;
     sizeMB: number;
   } | null>(null);
+  const [videoCover, setVideoCover] = useState<CompressedPhotoItem | null>(null);
 
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
   const [condition, setCondition] = useState<"novo" | "usado">("novo");
   const [categoryName, setCategoryName] = useState(categories[0]?.name || "Electrónicos");
-  const [municipality, setMunicipality] = useState(
-    myStore?.municipality || user?.municipality || "Uíge"
+  const [municipality, setMunicipality] = useState(initialMun);
+  const [bairro, setBairro] = useState(
+    myStore?.bairro || user?.bairro || getBairrosByMunicipality(initialMun)[0]
   );
+  const [whatsapp, setWhatsapp] = useState(myStore?.phone || user?.phone || "");
   const [stock, setStock] = useState("1");
   const [description, setDescription] = useState("");
 
@@ -83,10 +93,19 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
 
   if (!isOpen || !user) return null;
 
+  const availableBairros = getBairrosByMunicipality(municipality);
+  const quota = checkDailyPublishQuota({
+    products: myProducts,
+    sellerId: user.id,
+    userCreatedAt: user.createdAt,
+    config: systemConfig,
+  });
+
   const resetForm = () => {
     setMediaKind("imagem");
     setPhotos([]);
     setVideoState(null);
+    setVideoCover(null);
     setName("");
     setPrice("");
     setCondition("novo");
@@ -125,6 +144,27 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
     }
   };
 
+  const handleSelectVideoCover = async (file: File | undefined) => {
+    if (!file) return;
+    setErrorMsg("");
+    setProcessingMedia(true);
+    try {
+      const res = await compressImage(file);
+      setVideoCover({
+        id: `vc_${Date.now()}`,
+        dataUrl: res.dataUrl,
+        blob: res.blob,
+        fileName: file.name || `capa_video_${Date.now()}.jpg`,
+        sizeKB: res.sizeKB,
+      });
+      showToast(`Foto de capa do vídeo carregada (${res.sizeKB} KB) ✓`);
+    } catch (err: unknown) {
+      setErrorMsg(translateErrorMessage(err, "Não foi possível processar a fotografia de capa."));
+    } finally {
+      setProcessingMedia(false);
+    }
+  };
+
   const handleSelectVideo = async (file: File | undefined) => {
     if (!file) return;
     setErrorMsg("");
@@ -142,6 +182,19 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
         durationSec: compressed.durationSec,
         sizeMB: compressed.sizeMB,
       });
+
+      if (!videoCover && photos.length === 0) {
+        const frame = await captureVideoFirstFrame(file).catch(() => null);
+        if (frame?.blob && frame?.dataUrl) {
+          setVideoCover({
+            id: `vc_${Date.now()}`,
+            dataUrl: frame.dataUrl,
+            blob: frame.blob,
+            fileName: `capa_${Date.now()}.jpg`,
+            sizeKB: frame.sizeKB || Math.max(1, Math.round(frame.blob.size / 1024)),
+          });
+        }
+      }
       showToast(`Vídeo pronto (${compressed.durationSec}s · ${compressed.sizeMB} MB) ✓`);
     } catch (err: unknown) {
       setVideoState(null);
@@ -159,23 +212,58 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
     e.preventDefault();
     setErrorMsg("");
 
+    if (user.isBanned || user.isSuspended || myStore?.isSuspended) {
+      setErrorMsg(
+        user.banReason ||
+          myStore?.suspensionReason ||
+          "A tua conta ou loja está impedida de publicar artigos."
+      );
+      return;
+    }
+
     if (!myStore) {
       setErrorMsg("Regista primeiro a tua loja no Painel do Comerciante.");
       return;
     }
 
-    const numericPrice = Number(price);
-    if (!name.trim() || !Number.isFinite(numericPrice) || numericPrice <= 0) {
-      setErrorMsg("Preenche o nome e um preço válido em Kz.");
+    if (!quota.allowed) {
+      setErrorMsg(
+        `Atingiste o limite diário de ${quota.limit} artigos (${quota.isNewAccount ? "conta recente < 24h" : "conta estabelecida"}). Tenta novamente amanhã.`
+      );
       return;
     }
 
+    const numericPrice = Number(price);
+    const activeCover = videoCover || photos[0] || null;
     if (mediaKind === "imagem" && photos.length === 0) {
-      setErrorMsg("Adiciona pelo menos 1 fotografia do artigo (ou troca para Vídeo).");
+      setErrorMsg("É obrigatório adicionar pelo menos 1 fotografia do artigo.");
       return;
     }
     if (mediaKind === "video" && !videoState) {
       setErrorMsg("Carrega um vídeo até 15 s e 10 MB (ou troca para Fotos).");
+      return;
+    }
+    if (mediaKind === "video" && !activeCover) {
+      setErrorMsg("Adiciona pelo menos 1 fotografia de capa para acompanhar o vídeo do artigo.");
+      return;
+    }
+
+    const validation = validateProductPublishFields({
+      name,
+      price: numericPrice,
+      whatsapp,
+      bairro,
+      image: mediaKind === "imagem" ? photos[0]?.dataUrl : activeCover?.dataUrl,
+      images:
+        mediaKind === "imagem"
+          ? photos.map((p) => p.dataUrl)
+          : activeCover
+          ? [activeCover.dataUrl]
+          : [],
+    });
+
+    if (!validation.ok) {
+      setErrorMsg(validation.error || "Preenche os campos obrigatórios para publicar.");
       return;
     }
 
@@ -197,6 +285,21 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
           }
         }
       } else if (videoState) {
+        if (activeCover) {
+          if (isSupabaseConfigured && navigator.onLine) {
+            const { url, error } = await uploadMediaFile(
+              activeCover.blob,
+              activeCover.fileName,
+              "produtos"
+            );
+            if (error || !url) {
+              throw error || new Error("Falha ao enviar fotografia de capa do vídeo.");
+            }
+            uploadedImages.push(url);
+          } else {
+            uploadedImages.push(activeCover.dataUrl);
+          }
+        }
         if (isSupabaseConfigured && navigator.onLine) {
           const { url, error } = await uploadMediaFile(
             videoState.blob,
@@ -223,20 +326,26 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
         condition,
         categoryName,
         municipality,
+        bairro: bairro.trim(),
+        whatsapp: validation.normalizedWhatsapp || whatsapp.trim(),
         description: description.trim(),
-        image: uploadedImages[0] || myStore.facadeImage || myStore.logo || "",
+        image: uploadedImages[0],
         images: uploadedImages,
         videoUrl: uploadedVideoUrl,
         mediaType: mediaKind,
         isApproved: !systemConfig.requireProductApproval,
       });
 
-      const needsApproval = Boolean(systemConfig.requireProductApproval) || created.isApproved === false;
-      showToast(
-        needsApproval
-          ? "Artigo enviado! Aguarda aprovação do administrador para aparecer no catálogo."
-          : "Artigo publicado no Mercado Uíge ✓"
-      );
+      if (created.moderationStatus === "em_revisao") {
+        showToast(
+          created.moderationReason ||
+            "Artigo retido em revisão por conter termos sujeitos a verificação."
+        );
+      } else if (Boolean(systemConfig.requireProductApproval) || created.isApproved === false) {
+        showToast("Artigo enviado! Aguarda aprovação do administrador para aparecer no catálogo.");
+      } else {
+        showToast("Artigo publicado no Mercado Uíge ✓");
+      }
 
       resetForm();
       await onPublished(created);
@@ -300,11 +409,26 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="mt-4 space-y-3.5 text-xs">
+            <div
+              className="p-2.5 rounded-xl border text-[11px] flex items-center justify-between gap-2"
+              style={{
+                borderColor: quota.allowed ? "var(--border)" : "rgba(239, 68, 68, 0.4)",
+                backgroundColor: quota.allowed ? "var(--surface-secondary)" : "rgba(239, 68, 68, 0.12)",
+              }}
+            >
+              <span className="font-bold">
+                Publicado hoje: {quota.used} / {quota.limit} artigos
+              </span>
+              <span className="opacity-75">
+                {quota.allowed ? `Restam ${quota.remaining} hoje` : "Limite diário atingido"}
+              </span>
+            </div>
+
             {systemConfig.requireProductApproval && (
               <div className="p-2.5 rounded-xl bg-[#246BFD]/15 border border-[#246BFD]/35 text-[11px] text-blue-200 flex items-start gap-2">
                 <CheckCircle2 size={14} className="text-[#B7F34A] shrink-0 mt-0.5" />
                 <span>
-                  A moderação está activa: após enviar, o artigo aguarda aprovação do administrador antes de ficar visível.
+                  A moderação prévia está activa: após enviar, o artigo aguarda aprovação do administrador antes de ficar visível.
                 </span>
               </div>
             )}
@@ -430,6 +554,25 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
                       />
                     </div>
                   )}
+
+                  <label
+                    className="min-h-[44px] p-2.5 rounded-xl border border-dashed flex items-center justify-center gap-2 cursor-pointer hover:border-[#246BFD]"
+                    style={{ borderColor: "var(--border)" }}
+                  >
+                    <Camera size={15} className="text-[#246BFD]" />
+                    <span className="font-bold">
+                      {videoCover
+                        ? `Foto de capa pronta (${videoCover.sizeKB} KB) ✓ — Trocar`
+                        : "Foto de capa do artigo (obrigatória para vídeo) *"}
+                    </span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      disabled={processingMedia}
+                      onChange={(e) => handleSelectVideoCover(e.target.files?.[0])}
+                      className="hidden"
+                    />
+                  </label>
                 </div>
               )}
             </div>
@@ -504,7 +647,7 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
               </div>
             </div>
 
-            {/* Categoria e Município */}
+            {/* Categoria, Município, Bairro e WhatsApp */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <div>
                 <label className="block font-bold mb-1">Categoria *</label>
@@ -529,7 +672,12 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
                 <label className="block font-bold mb-1">Município</label>
                 <select
                   value={municipality}
-                  onChange={(e) => setMunicipality(e.target.value)}
+                  onChange={(e) => {
+                    const nextMun = e.target.value;
+                    setMunicipality(nextMun);
+                    const nextBairros = getBairrosByMunicipality(nextMun);
+                    if (!nextBairros.includes(bairro)) setBairro(nextBairros[0]);
+                  }}
                   className="w-full min-h-[44px] px-3 rounded-xl border font-bold outline-none"
                   style={{
                     borderColor: "var(--border)",
@@ -543,6 +691,40 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
                     </option>
                   ))}
                 </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label className="block font-bold mb-1">Bairro no Uíge *</label>
+                <select
+                  value={bairro}
+                  onChange={(e) => setBairro(e.target.value)}
+                  className="w-full min-h-[44px] px-3 rounded-xl border font-bold outline-none"
+                  style={{
+                    borderColor: "var(--border)",
+                    backgroundColor: "var(--surface-secondary)",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  {availableBairros.map((b) => (
+                    <option key={b} value={b} className="bg-slate-900 text-white">
+                      {b}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block font-bold mb-1">WhatsApp de contacto *</label>
+                <input
+                  type="tel"
+                  required
+                  value={whatsapp}
+                  onChange={(e) => setWhatsapp(e.target.value)}
+                  placeholder="923 000 000"
+                  className="w-full min-h-[44px] px-3 rounded-xl border bg-transparent font-bold outline-none focus:border-[#246BFD]"
+                  style={{ borderColor: "var(--border)" }}
+                />
               </div>
             </div>
 
@@ -560,7 +742,7 @@ export const PublishProductModal: React.FC<PublishProductModalProps> = ({
 
             <button
               type="submit"
-              disabled={processingMedia || submitting}
+              disabled={processingMedia || submitting || !quota.allowed}
               className="w-full min-h-[48px] rounded-2xl font-black text-sm text-slate-950 shadow-lg cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
               style={{ backgroundColor: "var(--accent)" }}
             >

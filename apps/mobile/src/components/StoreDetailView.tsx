@@ -2,6 +2,7 @@ import React, { useMemo, useState } from "react";
 import {
   ArrowLeft,
   BadgeCheck,
+  Ban,
   Calendar,
   Crown,
   Flag,
@@ -33,6 +34,7 @@ import {
   formatActiveSince,
   formatStoreType,
   getStoreProductCategories,
+  getStoreVerificationLabel,
   isStoreVerified,
 } from "@mercado-uige/shared";
 import { ReviewsSection } from "./ReviewsSection";
@@ -49,6 +51,13 @@ interface StoreDetailViewProps {
   favorites: string[];
   isFollowing: boolean;
   followersCount: number;
+  isSellerBlocked?: boolean;
+  onToggleBlockSeller?: () => Promise<void> | void;
+  onReportReview?: (
+    reviewId: string,
+    reviewType: "loja" | "produto",
+    reason: string
+  ) => Promise<void> | void;
   onBack: () => void;
   onToggleFollow: () => void;
   onToggleFavorite: (product: Product) => void;
@@ -70,6 +79,9 @@ export const StoreDetailView: React.FC<StoreDetailViewProps> = ({
   favorites,
   isFollowing,
   followersCount,
+  isSellerBlocked = false,
+  onToggleBlockSeller,
+  onReportReview,
   onBack,
   onToggleFollow,
   onToggleFavorite,
@@ -161,18 +173,36 @@ export const StoreDetailView: React.FC<StoreDetailViewProps> = ({
           <span>Voltar às lojas</span>
         </button>
 
-        <button
-          type="button"
-          onClick={() => setShowReportForm((v) => !v)}
-          className="min-h-[44px] inline-flex items-center gap-1.5 px-3 rounded-xl border text-xs font-bold text-red-600 cursor-pointer"
-          style={{
-            backgroundColor: "var(--rbw-surface)",
-            borderColor: "var(--rbw-border)",
-          }}
-        >
-          <Flag size={14} />
-          <span>Denunciar</span>
-        </button>
+        <div className="flex items-center gap-1.5">
+          {onToggleBlockSeller && currentUser?.id !== store.ownerId && (
+            <button
+              type="button"
+              data-testid="store-block-seller-btn"
+              onClick={() => onToggleBlockSeller()}
+              className="min-h-[44px] inline-flex items-center gap-1.5 px-3 rounded-xl border text-xs font-bold cursor-pointer"
+              style={{
+                backgroundColor: "var(--rbw-surface)",
+                borderColor: "var(--rbw-border)",
+                color: isSellerBlocked ? "var(--rbw-text)" : "var(--rbw-muted)",
+              }}
+            >
+              <Ban size={14} />
+              <span>{isSellerBlocked ? "Desbloquear" : "Bloquear vendedor"}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setShowReportForm((v) => !v)}
+            className="min-h-[44px] inline-flex items-center gap-1.5 px-3 rounded-xl border text-xs font-bold text-red-600 cursor-pointer"
+            style={{
+              backgroundColor: "var(--rbw-surface)",
+              borderColor: "var(--rbw-border)",
+            }}
+          >
+            <Flag size={14} />
+            <span>Denunciar</span>
+          </button>
+        </div>
       </div>
 
       {showReportForm && (
@@ -236,13 +266,21 @@ export const StoreDetailView: React.FC<StoreDetailViewProps> = ({
                   {store.isVip && <Crown size={16} className="text-red-600 fill-red-600 shrink-0" />}
                 </div>
 
-                {verified && (
+                {verified ? (
                   <div
                     data-testid="store-verified-badge"
                     className="inline-flex items-center gap-1 text-xs font-bold text-red-600"
                   >
                     <BadgeCheck size={14} />
-                    <span>Loja verificada</span>
+                    <span>{getStoreVerificationLabel(store)}</span>
+                  </div>
+                ) : (
+                  <div
+                    data-testid="store-unverified-badge"
+                    className="inline-flex items-center gap-1 text-[11px] font-medium"
+                    style={{ color: "var(--rbw-muted)" }}
+                  >
+                    <span>{getStoreVerificationLabel(store)}</span>
                   </div>
                 )}
 
@@ -539,7 +577,7 @@ export const StoreDetailView: React.FC<StoreDetailViewProps> = ({
             <div className="flex items-center justify-between gap-2">
               <span style={{ color: "var(--rbw-muted)" }}>Estado de verificação</span>
               <span className={`font-bold ${verified ? "text-red-600" : ""}`}>
-                {verified ? "Loja verificada" : "Em verificação"}
+                {getStoreVerificationLabel(store)}
               </span>
             </div>
           </div>
@@ -550,12 +588,14 @@ export const StoreDetailView: React.FC<StoreDetailViewProps> = ({
       {activeTab === "avaliacoes" && (
         <ReviewsSection
           title={`Avaliações de ${store.name}`}
+          reviewType="loja"
           reviews={reviews}
           currentUser={currentUser}
           canReview={canReview}
           emptyEligibilityHint="Apenas clientes com encomenda entregue desta loja podem avaliar."
           onRequireAuth={onRequireAuth}
           onSubmitReview={onSubmitReview}
+          onReportReview={onReportReview}
         />
       )}
 

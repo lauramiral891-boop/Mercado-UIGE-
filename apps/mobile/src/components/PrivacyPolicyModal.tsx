@@ -48,6 +48,7 @@ const DeleteConfirmBlock: React.FC<{ onConfirm: () => void }> = ({ onConfirm }) 
 interface PrivacyPolicyModalProps {
   isOpen: boolean;
   onClose: () => void;
+  initialTab?: "privacidade" | "termos" | "eliminacao";
   onDeleteAccountRequested?: () => void;
   isLoggedIn?: boolean;
 }
@@ -55,10 +56,17 @@ interface PrivacyPolicyModalProps {
 export const PrivacyPolicyModal: React.FC<PrivacyPolicyModalProps> = ({
   isOpen,
   onClose,
+  initialTab = "privacidade",
   onDeleteAccountRequested,
   isLoggedIn,
 }) => {
-  const [tab, setTab] = useState<"privacidade" | "termos" | "eliminacao">("privacidade");
+  const [tab, setTab] = useState<"privacidade" | "termos" | "eliminacao">(initialTab);
+
+  React.useEffect(() => {
+    if (isOpen && initialTab) {
+      setTab(initialTab);
+    }
+  }, [isOpen, initialTab]);
 
   if (!isOpen) return null;
 
@@ -168,21 +176,28 @@ export const PrivacyPolicyModal: React.FC<PrivacyPolicyModalProps> = ({
           {tab === "termos" && (
             <div className="space-y-3">
               <h3 className="font-black text-sm text-[var(--text-primary)]">
-                1. Uso da Plataforma
+                1. Publicação Livre e Responsabilidade dos Vendedores
               </h3>
               <p>
-                O Mercado Uíge destina-se ao comércio legítimo de bens e serviços na província do Uíge e em Angola. É expressamente proibida a publicação de artigos ilícitos, falsificados ou sem stock comprovado.
+                Qualquer utilizador residente na província do Uíge pode abrir uma loja e publicar artigos de forma livre. Cada publicação exige fotografia real do artigo, preço em Kwanzas (Kz), bairro no Uíge e contacto WhatsApp válido. Contas com menos de 24 horas podem publicar até 5 artigos por dia; contas estabelecidas até 30 artigos por dia.
               </p>
 
               <h3 className="font-black text-sm text-[var(--text-primary)]">
-                2. Responsabilidade das Lojas
+                2. Artigos e Conteúdos Proibidos
               </h3>
               <p>
-                Cada comerciante é responsável pela exactidão dos preços em Kwanzas (Kz), descrição e entrega dos seus artigos. A administração do Mercado Uíge reserva-se o direito de suspender lojas com denúncias reiteradas de incumprimento.
+                É estritamente proibida a publicação de: <b>armas e munições</b>, <b>drogas ou estupefacientes</b>, <b>conteúdo adulto ou exploração</b>, <b>documentos falsos ou falsificações</b>, <b>medicamentos sujeitos a receita médica</b>, bem como <b>câmbio ilícito, notas falsas ou circulação irregular de dinheiro</b>. Publicações com termos proibidos ficam ocultas automaticamente para revisão.
               </p>
 
               <h3 className="font-black text-sm text-[var(--text-primary)]">
-                3. Moeda e Pagamentos
+                3. Denúncias, Moderação e Bloqueio de Vendedores
+              </h3>
+              <p>
+                Os utilizadores podem denunciar produtos, lojas ou avaliações abusivas e bloquear vendedores indesejados. Artigos que acumulem 3 denúncias de utilizadores distintos ficam ocultos automaticamente até decisão da administração. O selo <b>Loja verificada</b> é atribuído apenas pela administração. Violações graves resultam em remoção de artigos, suspensão da loja ou banimento definitivo da conta.
+              </p>
+
+              <h3 className="font-black text-sm text-[var(--text-primary)]">
+                4. Moeda e Pagamentos
               </h3>
               <p>
                 Todas as transacções são calculadas na moeda oficial da República de Angola, o Kwanza (Kz), suportando liquidação por Multicaixa Express ou no acto de entrega.

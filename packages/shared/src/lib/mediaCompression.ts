@@ -9,7 +9,7 @@ export const MAX_AD_VIDEO_DURATION_SEC = 15;
 export const MAX_AD_VIDEO_BYTES = 5 * 1024 * 1024; // 5 MB (banners em vídeo)
 export const AD_VIDEO_TARGET_BYTES = 4 * 1024 * 1024; // Alvo <= 4 MB após compressão no dispositivo
 
-export type PublishActionTarget = "publish" | "want_to_sell" | "login";
+export type PublishActionTarget = "publish" | "want_to_sell" | "login" | "banned";
 
 export interface VideoConstraintOptions {
   maxDurationSec?: number;
@@ -18,23 +18,27 @@ export interface VideoConstraintOptions {
 }
 
 /**
- * Garante que apenas comerciantes aprovados (e não suspensos) abrem directamente a publicação de artigos.
+ * Em publicação livre, qualquer utilizador registado (não banido/suspenso) que já tenha loja activa
+ * ou perfil comerciante activo abre directamente o formulário de publicação.
  */
 export function canMerchantPublishFloating(user: User | null, store?: Store | null): boolean {
-  if (!user || user.role !== "comerciante") return false;
-  if (user.isApproved !== true || user.isSuspended) return false;
-  if (store && (store.isApproved === false || store.isSuspended)) return false;
-  return true;
+  if (!user || user.isBanned || user.isSuspended) return false;
+  if (store) {
+    return !store.isSuspended && store.isApproved !== false;
+  }
+  return user.role === "comerciante";
 }
 
 /**
  * Resolve o destino do botão Publicar na barra inferior:
  * - Visitante sem conta -> login
- * - Comerciante aprovado -> publish
- * - Cliente normal ou comerciante ainda em aprovação -> want_to_sell ("Quero vender")
+ * - Conta banida ou suspensa -> banned
+ * - Utilizador registado com loja activa -> publish
+ * - Utilizador registado sem loja -> want_to_sell ("Quero vender", activação imediata)
  */
 export function resolvePublishAction(user: User | null, store?: Store | null): PublishActionTarget {
   if (!user) return "login";
+  if (user.isBanned || user.isSuspended || store?.isSuspended) return "banned";
   if (canMerchantPublishFloating(user, store)) return "publish";
   return "want_to_sell";
 }
